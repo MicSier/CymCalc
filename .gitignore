@@ -1,0 +1,9 @@
+# Ignore exec file
+a.exe
+# Editor trash
+.vscode
+# GMP folder
+GMP/
+GMP/*
+# My build bat script
+build.bat
