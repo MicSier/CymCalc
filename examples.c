@@ -4,9 +4,9 @@
 #include "cymcalc.h"
 
 int main() {
-    //--------------------------------------------
-    // Example 1: Symbolic differentiation
-    //--------------------------------------------
+    //----------------------------------------------------
+    // Example 1: Symbolic differentiation and integration
+    //----------------------------------------------------
 
     // Expression: f(x) = x^3 + sin(x)
 
@@ -25,9 +25,22 @@ int main() {
     char* df_str = expr_to_string(df);
     printf("f'(x) = %s\n", df_str);
     free(df_str);
+    Expr* Sf = expr_simplify(expr_integrate(f, "x"));         
+
+    df_str = expr_to_string(Sf);
+    printf("Sf(x) = %s\n", df_str);
+    free(df_str);
+    Expr* fn = expr_simplify(expr_integrate(df, "x"));         
+
+    df_str = expr_to_string(fn);
+    char* comp_str = (expr_equal(f,fn))?"TRUE":"FALSE";
+    printf("Sf'(x) = %s, so we have f(x)==Sf'(x) being %s\n", df_str, comp_str);
+    free(df_str);
 
     expr_release(df);
     expr_release(f);
+    expr_release(Sf);
+    expr_release(fn);
     expr_release(x);
 
     //--------------------------------------------
@@ -74,11 +87,19 @@ int main() {
     Expr* dh = expr_simplify(expr_diff(h, "x"));
     char* dh_str = expr_to_string(dh);
     printf("h'(x) = %s\n", dh_str);
-    free(dh_str);
+
+    Expr* Sh = expr_simplify(expr_integrate(h, "x"));         
+
+    dh_str = expr_to_string(Sh);
+    printf("Sh(x) = %s\n", dh_str);
+    free(dh_str);   
 
     expr_release(dh);
     expr_release(h);
     expr_release(x);
+    expr_release(x2);
+    expr_release(exp_x2);
+    expr_release(sinx);
 
     return 0;
 }

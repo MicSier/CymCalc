@@ -1,7 +1,7 @@
 #ifndef CYMCALC_H
 #define CYMCALC_H
 
-#include <gmp.h> //"C:\vcpkg\installed\x64-windows-static\include\gmp.h"
+#include <gmp.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -74,6 +74,11 @@ Expr* expr_symbol(char* name);
 Expr* expr_add(Expr* a, Expr* b);
 Expr* expr_mul(Expr* a, Expr* b);
 Expr* expr_pow(Expr* base, Expr* exponent);
+Expr* expr_div(const Expr* numerator, const Expr* denominator);
+Expr* expr_sub(const Expr* a, const Expr* b);
+
+// Unary operators
+Expr* expr_neg(const Expr* a);
 
 // Function application
 Expr* expr_func(FuncType f, Expr* arg);
@@ -93,20 +98,22 @@ Expr* expr_copy(const Expr* e);
 // Core Operations
 //-----------------------------------------------
 
-// Symbolic differentiation: d(expr)/d(symbol_name)
-Expr* expr_diff(const Expr* e, const char* symbol_name);
 
-// Simplification (dummy, can be implemented as no-op initially)
+Expr* expr_diff(const Expr* e, const char* symbol_name);
+Expr* expr_integrate(const Expr* e, const char* var);
+
 Expr* expr_simplify(const Expr* e);
 
 // Evaluate expression substituting symbol → number.
 // Returns new expression with substituted values.
 Expr* expr_substitute(const Expr* e, const char* symbol, const char* value_str);
+
 double expr_eval_numeric(const Expr* e);
 
 Expr* expr_eval(const Expr* e,
                 const char* symbol_name,
                 const char* value_str);
+
 
 //-----------------------------------------------
 // Printing
@@ -604,6 +611,21 @@ Expr* expr_simplify(const Expr* ec) {
                 }
             }
 
+            // a * b * x -> c * x
+            // number * (number * expr) → (number * number) * expr
+            if (left->type == EXPR_NUMBER &&
+                right->type == EXPR_MUL &&
+                right->data.binop.left->type == EXPR_NUMBER) {
+                
+                // multiply constants
+                Expr* merged = expr_mul_numbers(left, right->data.binop.left);
+                Expr* newmul = expr_mul(merged, expr_retain(right->data.binop.right));
+                
+                expr_release(left);
+                expr_release(right);
+                return expr_simplify(newmul);
+            }
+
             // keep as MUL
             Expr* result = expr_mul(left, right);
             return result;
@@ -1059,5 +1081,204 @@ Expr* expr_diff(const Expr* e, const char* var_name) {
             exit(1);
     }
 }
+
+Expr* expr_number_mpq(mpq_t value) {
+    Expr* num_expr;
+    num_expr = (Expr*) malloc(sizeof(Expr));
+    if (!num_expr) {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
+    num_expr->type = EXPR_NUMBER;
+    num_expr->refcount = 1;
+
+    mpq_init(num_expr->data.value);
+
+    mpq_canonicalize(value);
+    mpq_set(num_expr->data.value, value);
+
+    mpq_clear(value);
+
+    return num_expr;
+}
+
+void mpq_add_ui(mpq_t rop, const mpq_t op1, unsigned long int op2) {
+    mpq_t temp;
+    mpq_init(temp);
+    mpq_set_ui(temp, op2, 1);
+    mpq_add(rop, op1, temp);
+    mpq_clear(temp);
+}
+
+Expr* expr_integrate(const Expr* e, const char* var_name) {
+    if (!e) return NULL;
+
+    switch (e->type) {
+        case EXPR_NUMBER:
+            return expr_mul(expr_retain(e),expr_symbol(var_name));
+
+        case EXPR_SYMBOL:
+            if (strcmp(e->data.name, var_name) == 0) {
+                return expr_mul(expr_number("1/2"),expr_pow(expr_symbol(var_name), expr_number("2")));
+            } else {
+                return expr_mul(expr_retain(e),expr_symbol(var_name));
+            }
+
+        case EXPR_ADD: {
+            Expr* left = expr_integrate(e->data.binop.left, var_name);
+            Expr* right = expr_integrate(e->data.binop.right, var_name);
+            return expr_add(left, right);
+        }
+
+        case EXPR_MUL: {
+            Expr* f = e->data.binop.left;
+            Expr* g = e->data.binop.right;
+
+            if (g->type == EXPR_NUMBER) {
+                Expr* inner = expr_integrate(f, var_name);
+                return expr_mul(expr_retain(g), inner);
+            }
+
+            if (f->type == EXPR_NUMBER) {
+                Expr* inner = expr_integrate(g, var_name);
+                return expr_mul(expr_retain(f), inner);
+            }
+
+            break; // product rule not implemented
+            /*
+            Expr* sf = expr_integrate(f, var_name);
+            Expr* dg = expr_diff(g, var_name);
+
+            Expr* left_term = expr_mul(expr_retain(sf), expr_retain(g));
+            Expr* right_term = expr_mul(expr_retain(sf), expr_retain(dg));
+
+            return expr_add(left_term, right_term);*/
+        }
+
+        case EXPR_POW: {
+            Expr* base = e->data.binop.left;
+            Expr* exponent = e->data.binop.right;
+
+            if (exponent->type == EXPR_NUMBER &&
+                base->type == EXPR_SYMBOL &&
+                strcmp(base->data.name, var_name) == 0) {
+                // d/dx x^n = n * x^(n-1)
+
+                Expr* one = expr_number("1");
+                Expr* new_exp_expr = expr_simplify(expr_add(expr_retain(exponent),one));
+                //expr_release(one);
+                Expr* pow_expr = expr_pow(expr_copy(base), new_exp_expr);
+
+                Expr* coeff = expr_div(expr_copy(one),expr_retain(new_exp_expr));
+                expr_release(one);
+
+                return expr_mul(coeff, pow_expr);
+            } else {
+                fprintf(stderr, "Power rule for general expressions not implemented yet.\n");
+                exit(1);
+            }
+        }
+
+        case EXPR_FUNC: {
+            Expr* u = e->data.func.arg;
+            //Expr* du = expr_diff(u, var_name);
+            if (u->type == EXPR_SYMBOL && strcmp(u->data.name, var_name) == 0) {
+                switch (e->data.func.func) {
+                    case FUNC_SIN: {
+                        Expr* cos_u = expr_func(FUNC_COS, expr_copy(u));
+                        Expr* neg_cos_u = expr_mul(expr_number("-1"), cos_u);
+                        return neg_cos_u;
+                    }
+                    case FUNC_COS: {
+                        Expr* sin_u = expr_func(FUNC_SIN, expr_copy(u));
+                        return sin_u;
+                    }
+                    case FUNC_EXP: {
+                        Expr* exp_u = expr_func(FUNC_EXP, expr_copy(u));
+                        return exp_u;
+                    }
+                    case FUNC_LOG: {
+                        Expr* reciprocal = expr_pow(expr_copy(u), expr_number("-1"));
+                        return reciprocal;
+                    }
+                    default:
+                        fprintf(stderr, "Unknown function in Integration.\n");
+                        exit(1);
+                }
+            }
+
+        }
+
+        default:
+            fprintf(stderr, "Unknown expression type in Integration.\n");
+            exit(1);
+    }
+
+    char* e_str = expr_to_string(e);
+    fprintf(stderr, "Couldn't resolve integration for expression: %s.\n",e_str);
+    free(e_str); 
+    exit(1);
+}
+
+Expr* expr_neg(const Expr* a) {
+    if (!a) return NULL;
+
+    if (a->type == EXPR_NUMBER) {
+        mpq_t neg_value;
+        mpq_init(neg_value);
+        mpq_neg(neg_value, a->data.value);
+        Expr* neg = expr_number_mpq(neg_value);
+        mpq_clear(neg_value);
+        return neg;
+    }
+
+    Expr* minus1 = expr_number("-1");
+    Expr* result = expr_mul(minus1, expr_retain(a));
+    expr_release(minus1);
+    return expr_simplify(result);
+}
+
+Expr* expr_sub(const Expr* a, const Expr* b) {
+    if (!a || !b) return NULL;
+
+    Expr* neg_b = expr_neg(b);
+    Expr* result = expr_add(expr_retain(a), neg_b);
+    expr_release(neg_b);
+    return expr_simplify(result);
+}
+
+Expr* expr_div(const Expr* a, const Expr* b) {
+    if (!a || !b) return NULL;
+
+    if (b->type == EXPR_NUMBER && mpq_cmp_ui(b->data.value, 1, 1) == 0) {
+        return expr_retain(a); // a / 1 = a
+    }
+
+    // 0 / b = 0, for any b ≠ 0
+    if (a->type == EXPR_NUMBER && mpq_sgn(a->data.value) == 0) {
+        return expr_number("0");
+    }
+
+    // a / a = 1, for non-zero a
+    if (expr_equal(a, b)) {
+        return expr_number("1");
+    }
+
+    if (a->type == EXPR_NUMBER && b->type == EXPR_NUMBER) {
+        mpq_t q;
+        mpq_init(q);
+        mpq_div(q, a->data.value, b->data.value);
+        Expr* result = expr_number_mpq(q); // takes ownership or copies
+        //mpq_clear(q);
+        return result;
+    }
+
+    // a / b = a * b^(-1)
+    Expr* inverse = expr_pow(expr_retain(b), expr_number("-1"));
+    Expr* result = expr_mul(expr_retain(a), inverse);
+    expr_release(inverse);
+    return expr_simplify(result);
+}
+
 
 #endif // CYMCALC_IMPLEMENTATION
