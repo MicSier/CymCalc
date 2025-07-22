@@ -3,12 +3,23 @@
 #define CYMCALC_IMPLEMENTATION
 #include "cymcalc.h"
 
-int main() {
-    //----------------------------------------------------
-    // Example 1: Symbolic differentiation and integration
-    //----------------------------------------------------
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
-    // Expression: f(x) = x^3 + sin(x)
+void setup_utf8_console() {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+}
+
+int main() {
+
+    setup_utf8_console();
+
+    printf("----------------------------------------------------\n");
+    printf(" Example 1: Symbolic differentiation and integration\n");
+    printf("----------------------------------------------------\n");
 
     Expr* x = expr_symbol("x");
     Expr* x3 = expr_pow(expr_retain(x), expr_number("3"));
@@ -17,37 +28,37 @@ int main() {
 
     char* f_str = expr_to_string(f);
     printf("f(x) = %s\n", f_str);
-    free(f_str);
 
-    // Compute derivative: f'(x)
-    Expr* df = expr_simplify(expr_diff(f, "x"));         
+    Expr* df = expr_diff(f, "x");  
+    Expr* df_sim = expr_simplify(df);       
 
     char* df_str = expr_to_string(df);
-    printf("f'(x) = %s\n", df_str);
-    free(df_str);
-    Expr* Sf = expr_simplify(expr_integrate(f, "x"));         
+    char* dfs_str = expr_to_string(df_sim);
+    printf("%s = %s\n", df_str, dfs_str);
+    Expr* Sf = expr_int(f, "x"); 
+    Expr* Sf_sim = expr_simplify(Sf);        
 
-    df_str = expr_to_string(Sf);
-    printf("Sf(x) = %s\n", df_str);
-    free(df_str);
-    Expr* fn = expr_simplify(expr_integrate(df, "x"));         
+    char* Sf_str = expr_to_string(Sf);
+    char* Sfs_str = expr_to_string(Sf_sim);
 
-    df_str = expr_to_string(fn);
-    char* comp_str = (expr_equal(f,fn))?"TRUE":"FALSE";
-    printf("Sf'(x) = %s, so we have f(x)==Sf'(x) being %s\n", df_str, comp_str);
+    printf("%s = %s\n", Sf_str, Sfs_str);
+    Expr* Sdf = expr_int(df, "x"); 
+    Expr* Sdf_sim = expr_simplify(expr_int(df_sim,"x"));   
+    char* Sdf_str = expr_to_string(Sdf);
+    char* Sdfs_str = expr_to_string(Sdf_sim);
+    char* comp_str = (expr_equal(f,Sdf_sim))?"TRUE":"FALSE";
+    printf("%s = %s, so we have f(x)==Sf'(x)dx being %s\n",Sdf_str, Sdfs_str, comp_str);
     free(df_str);
 
     expr_release(df);
     expr_release(f);
     expr_release(Sf);
-    expr_release(fn);
     expr_release(x);
 
-    //--------------------------------------------
-    // Example 2: Evaluation
-    //--------------------------------------------
+    printf("--------------------------------------------\n");
+    printf(" Example 2: Evaluation\n");
+    printf("--------------------------------------------\n");
 
-    // Expression: g(y) = (3/2) * y + log(y)
     Expr* y = expr_symbol("y");
     Expr* three_half = expr_number("3/2");
     Expr* term1 = expr_mul(three_half, expr_retain(y));
@@ -68,11 +79,10 @@ int main() {
     expr_release(g);
     expr_release(y);
 
-    //--------------------------------------------
-    // Example 3: Nested expressions
-    //--------------------------------------------
+    printf("--------------------------------------------\n");
+    printf(" Example 3: Nested expressions\n");
+    printf("--------------------------------------------\n");
 
-    // Expression: h(x) = sin(x) * exp(x^2)
     x = expr_symbol("x");
     Expr* x2 = expr_pow(expr_retain(x), expr_number("2"));
     Expr* exp_x2 = expr_func(FUNC_EXP, x2);
@@ -88,7 +98,7 @@ int main() {
     char* dh_str = expr_to_string(dh);
     printf("h'(x) = %s\n", dh_str);
 
-    Expr* Sh = expr_simplify(expr_integrate(h, "x"));         
+    Expr* Sh = expr_simplify(expr_int(h, "x"));         
 
     dh_str = expr_to_string(Sh);
     printf("Sh(x) = %s\n", dh_str);

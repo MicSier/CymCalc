@@ -20,7 +20,9 @@ typedef enum {
     EXPR_ADD,
     EXPR_MUL,
     EXPR_POW,
-    EXPR_FUNC
+    EXPR_FUNC,
+    EXPR_DIFF,
+    EXPR_INT
 } ExprType;
 
 // Supported functions
@@ -57,6 +59,17 @@ struct Expr {
             FuncType func;
             Expr* arg;
         } func;
+
+        struct {
+            Expr* inner;   // Expression being differentiated
+            char* var;     // Variable name
+        } diff;
+
+        struct {
+            Expr* inner;   // Expression being integrated
+            char* var;     // Variable of integration
+        } integral;
+
     } data;
 };
 
@@ -76,6 +89,10 @@ Expr* expr_mul(Expr* a, Expr* b);
 Expr* expr_pow(Expr* base, Expr* exponent);
 Expr* expr_div(const Expr* numerator, const Expr* denominator);
 Expr* expr_sub(const Expr* a, const Expr* b);
+
+// Calculus operators
+Expr* expr_diff(Expr* e, const char* symbol_name);
+Expr* expr_int(Expr* e, const char* var);
 
 // Unary operators
 Expr* expr_neg(const Expr* a);
@@ -99,9 +116,8 @@ Expr* expr_copy(const Expr* e);
 //-----------------------------------------------
 
 
-Expr* expr_diff(const Expr* e, const char* symbol_name);
+Expr* expr_differentiate(const Expr* e, const char* symbol_name);
 Expr* expr_integrate(const Expr* e, const char* var);
-
 Expr* expr_simplify(const Expr* e);
 
 // Evaluate expression substituting symbol → number.
@@ -253,6 +269,26 @@ Expr* expr_func(FuncType f, Expr* arg) {
     return fun_expr;
 }
 
+Expr* expr_diff(Expr* f, const char* var) {
+    if (!f || !var) return NULL;
+    Expr* e = malloc(sizeof(Expr));
+    e->type = EXPR_DIFF;
+    e->refcount = 1;
+    e->data.diff.inner = expr_retain(f);
+    e->data.diff.var = strdup(var);
+    return e;
+}
+
+Expr* expr_int(Expr* f, const char* var) {
+    if (!f || !var) return NULL;
+    Expr* e = malloc(sizeof(Expr));
+    e->type = EXPR_INT;
+    e->refcount = 1;
+    e->data.integral.inner = expr_retain(f);
+    e->data.integral.var = strdup(var);
+    return e;
+}
+
 static inline char* concat(char* s1, const char* s2) {
     size_t len1 = strlen(s1);
     size_t len2 = strlen(s2);
@@ -323,6 +359,28 @@ char* expr_to_string_impl(char* string, const Expr* e) {
             string = concat(string, ")");
             break;
         }
+        
+        case EXPR_DIFF: {
+            char* inner_str = expr_to_string(e->data.diff.inner);
+            const char* var = e->data.diff.var;
+
+            char* result = malloc(strlen(inner_str) + strlen(var) + 32);
+            sprintf(result, "d/d%s(%s)", var, inner_str);
+
+            free(inner_str);
+            return result;
+        }
+
+        case EXPR_INT: {
+            char* inner_str = expr_to_string(e->data.integral.inner);
+            const char* var = e->data.integral.var;
+            char* result = malloc(strlen(inner_str) + strlen(var) + 16);
+            sprintf(result, "∫ %s d%s", inner_str, var);
+            free(inner_str);
+            return result;
+            break;
+        }
+
         default:
             fprintf(stderr, "Unknown expression type in conversion to string: %d.\n",e->type);
             exit(1);
@@ -358,6 +416,13 @@ void expr_release(Expr* e) {
         case EXPR_FUNC:
             expr_release(e->data.func.arg);
             break;
+        case EXPR_DIFF:
+            expr_release(e->data.diff.inner);
+        break;
+        case EXPR_INT:
+            expr_release(e->data.integral.inner);
+        break;
+
         default:
             fprintf(stderr, "Unknown expression type in release: %d\n", e->type);
             exit(1);
@@ -394,27 +459,27 @@ Expr* expr_mul_numbers(const Expr* a, const Expr* b) {
 
 /*Expr* expr_simplify(const Expr* e) {
     if (!e) return NULL;
-    Expr* ec = expr_copy(e);
+    Expr* e = expr_copy(e);
     switch (e->type) {
 
         case EXPR_NUMBER:
         case EXPR_SYMBOL:
-            return expr_retain(ec);
+            return expr_retain(e);
 
         case EXPR_ADD: {
-            Expr* left = expr_simplify(ec->data.binop.left);
-            Expr* right = expr_simplify(ec->data.binop.right);
+            Expr* left = expr_simplify(e->data.binop.left);
+            Expr* right = expr_simplify(e->data.binop.right);
 
             // number + number -> number
             if (left->type == EXPR_NUMBER && right->type == EXPR_NUMBER) {
                 /*mpq_t num;
                 mpq_init(num);
                 mpq_add(num, left->data.value, right->data.value);
-                ec->type=EXPR_NUMBER;
-                mpq_init(ec->data.value);
-                mpq_set(ec->data.value, num);
+                e->type=EXPR_NUMBER;
+                mpq_init(e->data.value);
+                mpq_set(e->data.value, num);
                 mpq_clear(num);
-                return expr_retain(ec);*//*
+                return expr_retain(e);*//*
                 Expr* result = expr_add_numbers(left, right);
                 expr_release(left);
                 expr_release(right);
@@ -440,19 +505,19 @@ Expr* expr_mul_numbers(const Expr* a, const Expr* b) {
         }
 
         case EXPR_MUL: {
-            Expr* left = expr_simplify(ec->data.binop.left);
-            Expr* right = expr_simplify(ec->data.binop.right);
+            Expr* left = expr_simplify(e->data.binop.left);
+            Expr* right = expr_simplify(e->data.binop.right);
             
             // number * number -> number
             if (left->type == EXPR_NUMBER && right->type == EXPR_NUMBER) {
                 mpq_t num;
                 mpq_init(num);
                 mpq_mul(num, left->data.value, right->data.value);
-                ec->type=EXPR_NUMBER;
-                mpq_init(ec->data.value);
-                mpq_set(ec->data.value, num);
+                e->type=EXPR_NUMBER;
+                mpq_init(e->data.value);
+                mpq_set(e->data.value, num);
                 mpq_clear(num);
-                return expr_retain(ec);
+                return expr_retain(e);
             }
 
             // Rule 2: swap number left
@@ -468,21 +533,21 @@ Expr* expr_mul_numbers(const Expr* a, const Expr* b) {
             // Rule 1: x^a * x^b
             if (left->type == EXPR_POW &&
                 right->type == EXPR_POW) {
-                // check if bases match
+                // chek if bases match
             }
 
             return expr_mul(left, right);
         }
 
         case EXPR_POW: {
-            Expr* base = expr_simplify(ec->data.binop.left);
-            Expr* exponent = expr_simplify(ec->data.binop.right);
+            Expr* base = expr_simplify(e->data.binop.left);
+            Expr* exponent = expr_simplify(e->data.binop.right);
             return expr_pow(base, exponent);
         }
 
         case EXPR_FUNC: {
-            Expr* arg = expr_simplify(ec->data.func.arg);
-            return expr_func(ec->data.func.func, arg);
+            Expr* arg = expr_simplify(e->data.func.arg);
+            return expr_func(e->data.func.func, arg);
         }
 
         default:
@@ -491,18 +556,109 @@ Expr* expr_mul_numbers(const Expr* a, const Expr* b) {
     }
 }*/
 
-Expr* expr_simplify(const Expr* ec) {
-    if (!ec) return NULL;
+const char* func_type_name(FuncType f) {
+    switch (f) {
+        case FUNC_SIN: return "sin";
+        case FUNC_COS: return "cos";
+        case FUNC_EXP: return "exp";
+        case FUNC_LOG: return "log";
+        default:       return "unknown_func";
+    }
+}
 
-    switch (ec->type) {
+void expr_print_tree_impl(const Expr* e, int indent, const char* prefix) {
+    if (!e) {
+        printf("%*s%s(NULL)\n", indent, "", prefix);
+        return;
+    }
+
+    char buf[256];
+    const char* label = "???";
+
+    switch (e->type) {
+        case EXPR_NUMBER:
+            gmp_snprintf(buf, sizeof(buf), "NUMBER: %Qd", e->data.value);
+            label = buf;
+            break;
+
+        case EXPR_SYMBOL:
+            snprintf(buf, sizeof(buf), "SYMBOL: %s", e->data.name);
+            label = buf;
+            break;
+
+        case EXPR_ADD:
+            label = "ADD";
+            break;
+
+        case EXPR_MUL:
+            label = "MUL";
+            break;
+
+        case EXPR_POW:
+            label = "POW";
+            break;
+
+        case EXPR_FUNC:
+            snprintf(buf, sizeof(buf), "FUNC: %s", func_type_name(e->data.func.func));
+            label = buf;
+            break;
+
+        case EXPR_DIFF:
+            snprintf(buf, sizeof(buf), "DIFF w.r.t. %s", e->data.diff.var);
+            label = buf;
+            break;
+
+        case EXPR_INT:
+            snprintf(buf, sizeof(buf), "INTEGRAL w.r.t. %s", e->data.integral.var);
+            label = buf;
+            break;
+    }
+
+    printf("%*s%s%s\n", indent, "", prefix, label);
+
+    // Recurse on children
+    switch (e->type) {
+        case EXPR_ADD:
+        case EXPR_MUL:
+        case EXPR_POW:
+            expr_print_tree_impl(e->data.binop.left, indent + 4, "├── ");
+            expr_print_tree_impl(e->data.binop.right, indent + 4, "└── ");
+            break;
+
+        case EXPR_FUNC:
+            expr_print_tree_impl(e->data.func.arg, indent + 4, "└── ");
+            break;
+
+        case EXPR_DIFF:
+            expr_print_tree_impl(e->data.diff.inner, indent + 4, "└── ");
+            break;
+
+        case EXPR_INT:
+            expr_print_tree_impl(e->data.integral.inner, indent + 4, "└── ");
+            break;
+
+        default:
+            break;  // Nothing to recurse on
+    }
+}
+
+void expr_print_tree(const Expr* e) {
+    expr_print_tree_impl(e, 0, "");
+}
+
+
+Expr* expr_simplify(const Expr* e) {
+    if (!e) return NULL;
+
+    switch (e->type) {
 
         case EXPR_NUMBER:
         case EXPR_SYMBOL:
-            return expr_copy(ec);
+            return expr_copy(e);
 
         case EXPR_ADD: {
-            Expr* left = expr_simplify(ec->data.binop.left);
-            Expr* right = expr_simplify(ec->data.binop.right);
+            Expr* left = expr_simplify(e->data.binop.left);
+            Expr* right = expr_simplify(e->data.binop.right);
 
             // number + number → number
             if (left->type == EXPR_NUMBER && right->type == EXPR_NUMBER) {
@@ -550,8 +706,8 @@ Expr* expr_simplify(const Expr* ec) {
         }
 
         case EXPR_MUL: {
-            Expr* left = expr_simplify(ec->data.binop.left);
-            Expr* right = expr_simplify(ec->data.binop.right);
+            Expr* left = expr_simplify(e->data.binop.left);
+            Expr* right = expr_simplify(e->data.binop.right);
             
             // number * number → number
             if (left->type == EXPR_NUMBER && right->type == EXPR_NUMBER) {
@@ -616,10 +772,22 @@ Expr* expr_simplify(const Expr* ec) {
             if (left->type == EXPR_NUMBER &&
                 right->type == EXPR_MUL &&
                 right->data.binop.left->type == EXPR_NUMBER) {
-                
                 // multiply constants
                 Expr* merged = expr_mul_numbers(left, right->data.binop.left);
                 Expr* newmul = expr_mul(merged, expr_retain(right->data.binop.right));
+                expr_release(left);
+                expr_release(right);
+                return expr_simplify(newmul);
+            }
+
+            // a * x * b -> c * x
+            if (right->type == EXPR_NUMBER &&
+                left->type == EXPR_MUL &&
+                left->data.binop.right->type == EXPR_NUMBER) {
+                
+                // multiply constants
+                Expr* merged = expr_mul_numbers(right, left->data.binop.right);
+                Expr* newmul = expr_mul(merged, expr_retain(left->data.binop.left));
                 
                 expr_release(left);
                 expr_release(right);
@@ -632,8 +800,8 @@ Expr* expr_simplify(const Expr* ec) {
         }
 
         case EXPR_POW: {
-            Expr* base = expr_simplify(ec->data.binop.left);
-            Expr* exponent = expr_simplify(ec->data.binop.right);
+            Expr* base = expr_simplify(e->data.binop.left);
+            Expr* exponent = expr_simplify(e->data.binop.right);
             
             if (exponent->type == EXPR_NUMBER) {
                 if (mpq_cmp_ui(exponent->data.value, 0, 1) == 0) {
@@ -672,8 +840,35 @@ Expr* expr_simplify(const Expr* ec) {
         }
 
         case EXPR_FUNC: {
-            Expr* arg = expr_simplify(ec->data.func.arg);
-            return expr_func(ec->data.func.func, arg);
+            Expr* arg = expr_simplify(e->data.func.arg);
+            return expr_func(e->data.func.func, arg);
+        }
+
+        case EXPR_DIFF: {
+            const Expr* inner = e->data.diff.inner;
+            const char* var = e->data.diff.var;
+
+            Expr* simplified_inner = expr_simplify(inner);
+
+            // Try to fully evaluate the derivative using existing engine
+            Expr* attempted = expr_differentiate(simplified_inner, var);
+            if (attempted) return attempted;
+                
+            // Return symbolic diff since it couldn’t be evaluated
+            return expr_diff(simplified_inner, var);
+        }
+
+        case EXPR_INT: {
+            const Expr* inner = e->data.integral.inner;
+            const char* var = e->data.integral.var;
+
+            Expr* simp_inner = expr_simplify(inner);
+
+            // Try to evaluate with existing integration engine
+            Expr* attempted = expr_integrate(simp_inner, var);
+            if (attempted) return expr_simplify(attempted);
+            return expr_int(simp_inner, var);
+            
         }
 
         default:
@@ -973,7 +1168,7 @@ double expr_eval_numeric(const Expr* e) {
     }
 }
 
-Expr* expr_diff(const Expr* e, const char* var_name) {
+Expr* expr_differentiate(const Expr* e, const char* var_name) {
     if (!e) return NULL;
 
     switch (e->type) {
@@ -988,8 +1183,8 @@ Expr* expr_diff(const Expr* e, const char* var_name) {
             }
 
         case EXPR_ADD: {
-            Expr* left = expr_diff(e->data.binop.left, var_name);
-            Expr* right = expr_diff(e->data.binop.right, var_name);
+            Expr* left = expr_differentiate(e->data.binop.left, var_name);
+            Expr* right = expr_differentiate(e->data.binop.right, var_name);
             return expr_add(left, right);
         }
 
@@ -997,8 +1192,8 @@ Expr* expr_diff(const Expr* e, const char* var_name) {
             Expr* f = e->data.binop.left;
             Expr* g = e->data.binop.right;
 
-            Expr* df = expr_diff(f, var_name);
-            Expr* dg = expr_diff(g, var_name);
+            Expr* df = expr_differentiate(f, var_name);
+            Expr* dg = expr_differentiate(g, var_name);
 
             Expr* left_term = expr_mul(df, expr_copy(g));
             Expr* right_term = expr_mul(expr_copy(f), dg);
@@ -1044,13 +1239,13 @@ Expr* expr_diff(const Expr* e, const char* var_name) {
                 return expr_mul(coeff, pow_expr);
             } else {
                 fprintf(stderr, "Power rule for general expressions not implemented yet.\n");
-                exit(1);
+                return NULL;
             }
         }
 
         case EXPR_FUNC: {
             Expr* u = e->data.func.arg;
-            Expr* du = expr_diff(u, var_name);
+            Expr* du = expr_differentiate(u, var_name);
 
             switch (e->data.func.func) {
                 case FUNC_SIN: {
@@ -1067,8 +1262,8 @@ Expr* expr_diff(const Expr* e, const char* var_name) {
                     return expr_mul(exp_u, du);
                 }
                 case FUNC_LOG: {
-                    Expr* reciprocal = expr_pow(expr_copy(u), expr_number("-1"));
-                    return expr_mul(reciprocal, du);
+                    Expr* reiprocal = expr_pow(expr_copy(u), expr_number("-1"));
+                    return expr_mul(reiprocal, du);
                 }
                 default:
                     fprintf(stderr, "Unknown function in differentiation.\n");
@@ -1175,7 +1370,7 @@ Expr* expr_integrate(const Expr* e, const char* var_name) {
                 return expr_mul(coeff, pow_expr);
             } else {
                 fprintf(stderr, "Power rule for general expressions not implemented yet.\n");
-                exit(1);
+                return NULL;
             }
         }
 
@@ -1198,8 +1393,8 @@ Expr* expr_integrate(const Expr* e, const char* var_name) {
                         return exp_u;
                     }
                     case FUNC_LOG: {
-                        Expr* reciprocal = expr_pow(expr_copy(u), expr_number("-1"));
-                        return reciprocal;
+                        Expr* reiprocal = expr_pow(expr_copy(u), expr_number("-1"));
+                        return reiprocal;
                     }
                     default:
                         fprintf(stderr, "Unknown function in Integration.\n");
@@ -1215,9 +1410,10 @@ Expr* expr_integrate(const Expr* e, const char* var_name) {
     }
 
     char* e_str = expr_to_string(e);
+    
     fprintf(stderr, "Couldn't resolve integration for expression: %s.\n",e_str);
     free(e_str); 
-    exit(1);
+    return NULL;
 }
 
 Expr* expr_neg(const Expr* a) {
