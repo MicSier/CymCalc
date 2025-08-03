@@ -33,82 +33,90 @@ typedef enum {
     FUNC_LOG
 } FuncType;
 
-// Forward declaration
-typedef struct Expr Expr;
+typedef size_t ExprIndex;
 
-// Expression node
-struct Expr {
+typedef struct {
     ExprType type;
-    int refcount;
 
     union {
-        // For EXPR_NUMBER
+        // EXPR_NUMBER
         mpq_t value;
 
-        // For EXPR_SYMBOL
+        // EXPR_SYMBOL
         char* name;
 
-        // For binary operators (Add, Mul, Pow)
         struct {
-            Expr* left;
-            Expr* right;
+            ExprIndex left;
+            ExprIndex right;
         } binop;
 
-        // For functions (e.g. sin(x))
         struct {
             FuncType func;
-            Expr* arg;
+            ExprIndex arg;
         } func;
 
         struct {
-            Expr* inner;   // Expression being differentiated
-            char* var;     // Variable name
+            ExprIndex inner;
+            char* var;
         } diff;
 
         struct {
-            Expr* inner;   // Expression being integrated
-            char* var;     // Variable of integration
+            ExprIndex inner;
+            char* var;
         } integral;
 
     } data;
-};
+
+    // For arena bookkeeping
+    bool used;
+
+} Expr;
+
+#define MAX_EXPR_COUNT 10000
+#define INVALID_INDEX ((size_t)-1)
+
+typedef struct {
+    Expr pool[MAX_EXPR_COUNT];
+    int free_list[MAX_EXPR_COUNT]; // indices of free slots
+    int free_count;                // number of free slots available
+} ExprArena;
+
 
 //-----------------------------------------------
 // Constructors
 //-----------------------------------------------
 
-// Create number (rational constant)
-Expr* expr_number(char* num_str); // e.g. "3/4"
+ExprIndex expr_number(ExprArena* arena, char* num_str);
+ExprIndex expr_number_mpq(ExprArena* arena, const mpq_t value);
+ExprIndex expr_symbol(ExprArena* arena, char* name);
+ExprIndex expr_add(ExprArena* arena, ExprIndex left, ExprIndex right);
+ExprIndex expr_mul(ExprArena* arena, ExprIndex left, ExprIndex right);
+ExprIndex expr_pow(ExprArena* arena, ExprIndex base, ExprIndex exponent) ;
+ExprIndex expr_func(ExprArena* arena,FuncType f, ExprIndex arg);
 
-// Create symbol
-Expr* expr_symbol(char* name);
-
-// Binary operators
-Expr* expr_add(Expr* a, Expr* b);
-Expr* expr_mul(Expr* a, Expr* b);
-Expr* expr_pow(Expr* base, Expr* exponent);
-Expr* expr_div(const Expr* numerator, const Expr* denominator);
-Expr* expr_sub(const Expr* a, const Expr* b);
+ExprIndex expr_div(ExprArena* arena, ExprIndex numerator, ExprIndex denominator);
+ExprIndex expr_sub(const Expr* a, const Expr* b);
 
 // Calculus operators
-Expr* expr_diff(Expr* e, const char* symbol_name);
-Expr* expr_int(Expr* e, const char* var);
+ExprIndex expr_diff(ExprArena* arena, ExprIndex e, const char* symbol_name);
+ExprIndex expr_int(ExprArena* arena, ExprIndex e, const char* symbol_name);
 
 // Unary operators
 Expr* expr_neg(const Expr* a);
 
-// Function application
-Expr* expr_func(FuncType f, Expr* arg);
-
 // Compere Expresions
-int expr_equal(const Expr* a, const Expr* b);
+int expr_equal(const ExprArena* arena, ExprIndex a_idx, ExprIndex b_idx);
 
 //-----------------------------------------------
 // Memory Management
 //-----------------------------------------------
 
-Expr* expr_retain(Expr* e);
-void expr_release(Expr* e);
+ExprIndex expr_arena_alloc(ExprArena* arena);
+
+void expr_arena_free(ExprArena* arena, ExprIndex e);
+void expr_arena_init(ExprArena* arena);
+
+
 Expr* expr_copy(const Expr* e);
 
 //-----------------------------------------------
@@ -116,15 +124,15 @@ Expr* expr_copy(const Expr* e);
 //-----------------------------------------------
 
 
-Expr* expr_differentiate(const Expr* e, const char* symbol_name);
-Expr* expr_integrate(const Expr* e, const char* var);
-Expr* expr_simplify(const Expr* e);
+ExprIndex expr_differentiate(ExprArena* arena, const ExprIndex e, const char* symbol_name);
+ExprIndex expr_integrate(ExprArena* arena, const ExprIndex e, const char* var);
+ExprIndex expr_simplify(ExprArena* arena, const ExprIndex e);
 
 // Evaluate expression substituting symbol → number.
 // Returns new expression with substituted values.
-Expr* expr_substitute(const Expr* e, const char* symbol, const char* value_str);
+ExprIndex expr_substitute(ExprArena* arena, ExprIndex e, const char* symbol, const char* value_str);
 
-double expr_eval_numeric(const Expr* e);
+double expr_eval_numeric(ExprArena* arena, ExprIndex e);
 
 Expr* expr_eval(const Expr* e,
                 const char* symbol_name,
@@ -137,6 +145,7 @@ Expr* expr_eval(const Expr* e,
 
 // Print to string in infix notation.
 // The returned string is heap-allocated. Caller must free it.
+void expr_print(ExprArena* arena, ExprIndex idx);
 char* expr_to_string(const Expr* e);
 
 #ifdef __cplusplus
@@ -147,25 +156,74 @@ char* expr_to_string(const Expr* e);
 
 #ifdef CYMCALC_IMPLEMENTATION
 
-Expr* expr_retain(Expr* e) {
-    if (e) {
-        e->refcount++;
+void expr_arena_init(ExprArena* arena) {
+    arena->free_count = MAX_EXPR_COUNT;
+    for (size_t i = 0; i < MAX_EXPR_COUNT; i++) {
+        arena->pool[i].used = false;
+        arena->free_list[i] = MAX_EXPR_COUNT - 1 - i;  // Reverse order free list for better locality
     }
-    return e;
 }
 
-Expr* expr_number(char* num_str) {
-    Expr* num_expr;
-    num_expr = (Expr*) malloc(sizeof(Expr));
-    if (!num_expr) {
-        fprintf(stderr, "Out of memory\n");
+ExprIndex expr_arena_alloc(ExprArena* arena) {
+    if (arena->free_count == 0) {
+        fprintf(stderr, "ExprArena out of memory!\n");
         exit(1);
     }
+    size_t index = arena->free_list[--arena->free_count];
+    Expr* e = &arena->pool[index];
+    e->used = true;
+    // Clear or init union fields if needed (especially mpq_t)
+    memset(&e->data, 0, sizeof(e->data));
+    return index;
+}
+
+void expr_arena_free(ExprArena* arena, ExprIndex index) {
+    if (index == INVALID_INDEX || !arena->pool[index].used) return;
+    Expr* e = &arena->pool[index];
+    // Free internal allocated data depending on type:
+    switch (e->type) {
+        case EXPR_NUMBER:
+            mpq_clear(e->data.value);
+            break;
+        case EXPR_SYMBOL:
+            free(e->data.name);
+            break;
+        case EXPR_DIFF:
+            free(e->data.diff.var);
+            break;
+        case EXPR_INT:
+            free(e->data.integral.var);
+            break;
+        default:
+            break;
+    }
+    e->used = false;
+    arena->free_list[arena->free_count++] = index;
+}
+
+void expr_arena_clear(ExprArena* arena) {
+    for (size_t i = 0; i < MAX_EXPR_COUNT; i++) {
+        if (arena->pool[i].used) {
+            expr_arena_free(arena, i);
+        }
+    }
+}
+
+Expr* expr_at(ExprArena* arena, ExprIndex index) {
+    if (index == INVALID_INDEX || index >= MAX_EXPR_COUNT || !arena->pool[index].used) {
+        printf("error out of range expr index %d\n",index);
+        exit(1);
+        //return NULL;
+    }
+    return &arena->pool[index];
+}
+
+ExprIndex expr_number(ExprArena* arena, char* num_str) {
+    ExprIndex idx = expr_arena_alloc(arena);
+    Expr* num_expr = expr_at(arena,idx);
     num_expr->type = EXPR_NUMBER;
-    num_expr->refcount = 1;
 
     mpq_init(num_expr->data.value);
-
     mpq_t num;
     mpq_init(num);
 
@@ -174,86 +232,65 @@ Expr* expr_number(char* num_str) {
         exit(1);
     }
     mpq_canonicalize(num);
-    //gmp_printf("Fraction = %Qd\n", num);
     mpq_set(num_expr->data.value, num);
-
     mpq_clear(num);
 
-    return num_expr;
+    return idx;
 }
 
-Expr* expr_symbol(char* name) {
-    Expr* sym_expr;
-    sym_expr = (Expr*) malloc(sizeof(Expr));
-    if (!sym_expr) {
-        fprintf(stderr, "Out of memory\n");
-        exit(1);
-    }
+ExprIndex expr_symbol(ExprArena* arena, char* name) {
+    ExprIndex idx = expr_arena_alloc(arena);
+    Expr* sym_expr = expr_at(arena,idx);
     sym_expr->type = EXPR_SYMBOL;
-    sym_expr->refcount = 1;
-
-    sym_expr->data.name = strdup(name);;
-
-    return sym_expr;
-}
-
-Expr* expr_add(Expr* a, Expr* b) {
-    Expr* add_expr;
-    add_expr = (Expr*) malloc(sizeof(Expr));
-    if (!add_expr) {
+    sym_expr->data.name = strdup(name);
+    if (!sym_expr->data.name) {
         fprintf(stderr, "Out of memory\n");
         exit(1);
     }
+    return idx;
+}
+
+ExprIndex expr_add(ExprArena* arena, ExprIndex left, ExprIndex right) {
+    ExprIndex idx = expr_arena_alloc(arena);
+    Expr* add_expr = expr_at(arena,idx);
     add_expr->type = EXPR_ADD;
-    add_expr->refcount = 1;
 
-    add_expr->data.binop.left  = expr_retain(a);
-    add_expr->data.binop.right = expr_retain(b);
+    add_expr->data.binop.left  = left;
+    add_expr->data.binop.right = right;
 
-    return add_expr;
+    return idx;
 }
 
-Expr* expr_mul(Expr* a, Expr* b) {
-    Expr* mul_expr;
-    mul_expr = (Expr*) malloc(sizeof(Expr));
-    if (!mul_expr) {
-        fprintf(stderr, "Out of memory\n");
-        exit(1);
-    }
+ExprIndex expr_mul(ExprArena* arena, ExprIndex left, ExprIndex right) {
+    ExprIndex idx = expr_arena_alloc(arena);
+    Expr* mul_expr= expr_at(arena,idx);
+
     mul_expr->type = EXPR_MUL;
-    mul_expr->refcount = 1;
 
-    mul_expr->data.binop.left  = expr_retain(a);
-    mul_expr->data.binop.right = expr_retain(b);
+    mul_expr->data.binop.left  = left;
+    mul_expr->data.binop.right = right;
 
-    return mul_expr;
+    return idx;
 }
 
-Expr* expr_pow(Expr* base, Expr* exponent) {
-    Expr* pow_expr;
-    pow_expr = (Expr*) malloc(sizeof(Expr));
-    if (!pow_expr) {
-        fprintf(stderr, "Out of memory\n");
-        exit(1);
-    }
+ExprIndex expr_pow(ExprArena* arena, ExprIndex base, ExprIndex exponent) {
+    ExprIndex idx = expr_arena_alloc(arena);
+    Expr* pow_expr= expr_at(arena,idx);
+
     pow_expr->type = EXPR_POW;
-    pow_expr->refcount = 1;
 
-    pow_expr->data.binop.left  = expr_retain(base);
-    pow_expr->data.binop.right = expr_retain(exponent);
+    pow_expr->data.binop.left  = base;
+    pow_expr->data.binop.right = exponent;
 
-    return pow_expr;
+    return idx;
 }
 
-Expr* expr_func(FuncType f, Expr* arg) {
-    Expr* fun_expr;
-    fun_expr = (Expr*) malloc(sizeof(Expr));
-    if (!fun_expr) {
-        fprintf(stderr, "Out of memory\n");
-        exit(1);
-    }
+ExprIndex expr_func(ExprArena* arena,FuncType f, ExprIndex arg) {
+    ExprIndex idx = expr_arena_alloc(arena);
+    Expr* fun_expr = expr_at(arena,idx);
+
     fun_expr->type = EXPR_FUNC;
-    fun_expr->refcount = 1;
+
     switch (f) {
         case FUNC_SIN: break;
         case FUNC_COS: break;
@@ -264,29 +301,102 @@ Expr* expr_func(FuncType f, Expr* arg) {
             exit(1);
     }
     fun_expr->data.func.func = f;
-    fun_expr->data.func.arg  = expr_retain(arg);
+    fun_expr->data.func.arg  = arg;
 
-    return fun_expr;
+    return idx;
 }
 
-Expr* expr_diff(Expr* f, const char* var) {
-    if (!f || !var) return NULL;
-    Expr* e = malloc(sizeof(Expr));
+ExprIndex expr_diff(ExprArena* arena, ExprIndex f, const char* var) {
+    //if (!(false) || !var) return NULL;
+    ExprIndex idx = expr_arena_alloc(arena);
+    Expr* e = expr_at(arena,idx);
     e->type = EXPR_DIFF;
-    e->refcount = 1;
-    e->data.diff.inner = expr_retain(f);
+    e->data.diff.inner = f;
     e->data.diff.var = strdup(var);
-    return e;
+    return idx;
 }
 
-Expr* expr_int(Expr* f, const char* var) {
-    if (!f || !var) return NULL;
-    Expr* e = malloc(sizeof(Expr));
+ExprIndex expr_int(ExprArena* arena, ExprIndex f, const char* var) {
+    //if (!(false) || !var) return NULL;
+    ExprIndex idx = expr_arena_alloc(arena);
+    Expr* e = expr_at(arena,idx);
     e->type = EXPR_INT;
-    e->refcount = 1;
-    e->data.integral.inner = expr_retain(f);
-    e->data.integral.var = strdup(var);
-    return e;
+    e->data.diff.inner = f;
+    e->data.diff.var = strdup(var);
+    return idx;
+}
+
+void expr_print(ExprArena* arena, ExprIndex idx) {
+    Expr* e = expr_at(arena, idx);
+    if (!e) {
+        printf("<null>");
+        return;
+    }
+    switch (e->type) {
+        case EXPR_NUMBER:
+            gmp_printf("%Qd", e->data.value);
+            break;
+        case EXPR_SYMBOL:
+            printf("%s", e->data.name);
+            break;
+        case EXPR_ADD:
+            printf("(");
+            expr_print(arena, e->data.binop.left);
+            printf(" + ");
+            expr_print(arena, e->data.binop.right);
+            printf(")");
+            break;
+        case EXPR_MUL:
+            printf("(");
+            expr_print(arena, e->data.binop.left);
+            printf(" * ");
+            expr_print(arena, e->data.binop.right);
+            printf(")");
+            break;
+        case EXPR_POW:
+            printf("(");
+            expr_print(arena, e->data.binop.left);
+            printf(" ^ ");
+            expr_print(arena, e->data.binop.right);
+            printf(")");
+            break;
+        case EXPR_FUNC:
+            switch (e->data.func.func) {
+                case FUNC_SIN: printf("sin"); break;
+                case FUNC_COS: printf("cos"); break;
+                case FUNC_EXP: printf("exp"); break;
+                case FUNC_LOG: printf("log"); break;
+                default:
+                    fprintf(stderr, "Unknown function type: %d\n", e->data.func.func);
+                    exit(1);
+            }
+            printf("(");
+            expr_print(arena, e->data.func.arg);
+            printf(")");
+            break;
+        case EXPR_DIFF:
+        {
+            const char* var = e->data.diff.var;
+
+            printf("d/d%s", var);
+            printf("(");
+            expr_print(arena, e->data.diff.inner);
+            printf(")");
+            break;
+        }
+        case EXPR_INT:
+        {
+            const char* var = e->data.integral.var;
+            printf( "∫");
+            printf("(");
+            expr_print(arena, e->data.integral.inner);
+            printf(")");
+            printf( "d%s",var);
+            break;
+        }
+        default:
+            printf("<expr_type_%d>", e->type);
+    }
 }
 
 static inline char* concat(char* s1, const char* s2) {
@@ -298,7 +408,7 @@ static inline char* concat(char* s1, const char* s2) {
     free(s1);
     return result;
 }
-
+/*
 char* expr_to_string_impl(char* string, const Expr* e) {
     const size_t len = strlen(string);
     switch(e->type)
@@ -388,64 +498,102 @@ char* expr_to_string_impl(char* string, const Expr* e) {
     return string;
 }
 
+
 char* expr_to_string(const Expr* e) {
     char* s=malloc(1);
     s[0] = '\0';
-    return expr_to_string_impl(s, e);
+    return expr_to_string_impl(a, s, e);
+}
+*/
+
+ExprType expr_type(ExprArena* arena, ExprIndex idx) {
+    return (expr_at(arena,idx))->type;
 }
 
-void expr_release(Expr* e) {
-    if (!e) return;
-
-    e->refcount--;
-    if (e->refcount > 0) return;
-
-    switch (e->type) {
-        case EXPR_NUMBER:
-            mpq_clear(e->data.value);
-            break;
-        case EXPR_SYMBOL:
-            free(e->data.name);
-            break;
-        case EXPR_ADD:
-        case EXPR_MUL:
-        case EXPR_POW:
-            expr_release(e->data.binop.left);
-            expr_release(e->data.binop.right);
-            break;
-        case EXPR_FUNC:
-            expr_release(e->data.func.arg);
-            break;
-        case EXPR_DIFF:
-            expr_release(e->data.diff.inner);
-        break;
-        case EXPR_INT:
-            expr_release(e->data.integral.inner);
-        break;
-
-        default:
-            fprintf(stderr, "Unknown expression type in release: %d\n", e->type);
-            exit(1);
+FuncType expr_ftype(ExprArena* arena, ExprIndex idx) {
+    Expr* e = expr_at(arena, idx);
+    if (!e || e->type != EXPR_FUNC) {
+        fprintf(stderr, "expr_value: not a function\n");
+        exit(1);
     }
-    free(e);
+    return e->data.func.func;
 }
 
-Expr* expr_add_numbers(const Expr* a, const Expr* b) {
-    Expr* result = malloc(sizeof(Expr));
+ExprIndex expr_arg(ExprArena* arena, ExprIndex idx) {
+    Expr* e = expr_at(arena, idx);
+    if (!e || e->type != EXPR_FUNC) {
+        fprintf(stderr, "expr_value: not a function\n");
+        exit(1);
+    }
+    return e->data.func.arg;
+}
+
+mpq_t* expr_value(ExprArena* arena, ExprIndex idx) {
+    Expr* e = expr_at(arena, idx);
+    if (!e || e->type != EXPR_NUMBER) {
+        fprintf(stderr, "expr_value: not a number\n");
+        exit(1);
+    }
+    return &e->data.value;
+}
+
+char* expr_name(ExprArena* arena, ExprIndex idx) {
+    Expr* e = expr_at(arena, idx);
+    if (!e || e->type != EXPR_SYMBOL) {
+        fprintf(stderr, "expr_value: not a number\n");
+        exit(1);
+    }
+    return e->data.name;
+}
+
+ExprIndex expr_left(ExprArena* arena, ExprIndex idx) {
+    Expr* e = expr_at(arena, idx);
+    if (!e || (e->type != EXPR_MUL && e->type != EXPR_ADD && e->type != EXPR_POW)) {
+        fprintf(stderr, "expr_value: not a binop %d \n", e->type);
+        exit(1);
+    }
+    return e->data.binop.left;
+}
+
+ExprIndex expr_right(ExprArena* arena, ExprIndex idx) {
+    Expr* e = expr_at(arena, idx);
+    if (!e || e->type != EXPR_MUL && e->type != EXPR_ADD && e->type != EXPR_POW) {
+        fprintf(stderr, "expr_value: not a binop %d \n", e->type);
+        exit(1);
+    }
+    return e->data.binop.right;
+}
+
+ExprIndex expr_add_numbers(ExprArena* arena, ExprIndex a_idx, ExprIndex b_idx) {
+    Expr* a = expr_at(arena, a_idx);
+    Expr* b = expr_at(arena, b_idx);
+    if (!a || !b || a->type != EXPR_NUMBER || b->type != EXPR_NUMBER) {
+        fprintf(stderr, "expr_add_numbers: operands must be EXPR_NUMBER\n");
+        exit(1);
+    }
+
+    ExprIndex result_idx = expr_arena_alloc(arena);
+    Expr* result = expr_at(arena, result_idx);
     result->type = EXPR_NUMBER;
-    result->refcount = 1;
     mpq_init(result->data.value);
     mpq_add(result->data.value, a->data.value, b->data.value);
-    return result;
+    return result_idx;
 }
 
-Expr* expr_mul_numbers(const Expr* a, const Expr* b) {
-    Expr* result = malloc(sizeof(Expr));
+ExprIndex expr_mul_numbers(ExprArena* arena, ExprIndex a_idx, ExprIndex b_idx) {
+    Expr* a = expr_at(arena, a_idx);
+    Expr* b = expr_at(arena, b_idx);
+    if (!a || !b || a->type != EXPR_NUMBER || b->type != EXPR_NUMBER) {
+        fprintf(stderr, "expr_mul_numbers: operands must be EXPR_NUMBER\n");
+        exit(1);
+    }
+
+    ExprIndex result_idx = expr_arena_alloc(arena);
+    Expr* result = expr_at(arena, result_idx);
     result->type = EXPR_NUMBER;
-    result->refcount = 1;
     mpq_init(result->data.value);
     mpq_mul(result->data.value, a->data.value, b->data.value);
-    return result;
+    return result_idx;
 }
 
 /*Expr* expr_pow_numbers(const Expr* a, const Expr* b) {
@@ -455,105 +603,6 @@ Expr* expr_mul_numbers(const Expr* a, const Expr* b) {
     mpq_init(result->data.value);
     mpq_pow(result->data.value, a->data.value, b->data.value);
     return result;
-}*/
-
-/*Expr* expr_simplify(const Expr* e) {
-    if (!e) return NULL;
-    Expr* e = expr_copy(e);
-    switch (e->type) {
-
-        case EXPR_NUMBER:
-        case EXPR_SYMBOL:
-            return expr_retain(e);
-
-        case EXPR_ADD: {
-            Expr* left = expr_simplify(e->data.binop.left);
-            Expr* right = expr_simplify(e->data.binop.right);
-
-            // number + number -> number
-            if (left->type == EXPR_NUMBER && right->type == EXPR_NUMBER) {
-                /*mpq_t num;
-                mpq_init(num);
-                mpq_add(num, left->data.value, right->data.value);
-                e->type=EXPR_NUMBER;
-                mpq_init(e->data.value);
-                mpq_set(e->data.value, num);
-                mpq_clear(num);
-                return expr_retain(e);*//*
-                Expr* result = expr_add_numbers(left, right);
-                expr_release(left);
-                expr_release(right);
-                return result;
-            }
-
-            // a*x + b*x -> (a+b) * x
-            if (left->type == EXPR_MUL &&
-                right->type == EXPR_MUL) {
-                if (expr_equal(left->data.binop.right, right->data.binop.right)) {
-                    Expr* a = left->data.binop.left;
-                    Expr* b = right->data.binop.left;
-                    Expr* sum = expr_simplify(expr_add(a, b));
-                    Expr* result = expr_mul(sum, expr_retain(left->data.binop.right));
-                    expr_release(left);
-                    expr_release(right);
-                    return result;
-                }
-            }
-
-            // else return ADD(left, right)
-            return expr_add(left, right);
-        }
-
-        case EXPR_MUL: {
-            Expr* left = expr_simplify(e->data.binop.left);
-            Expr* right = expr_simplify(e->data.binop.right);
-            
-            // number * number -> number
-            if (left->type == EXPR_NUMBER && right->type == EXPR_NUMBER) {
-                mpq_t num;
-                mpq_init(num);
-                mpq_mul(num, left->data.value, right->data.value);
-                e->type=EXPR_NUMBER;
-                mpq_init(e->data.value);
-                mpq_set(e->data.value, num);
-                mpq_clear(num);
-                return expr_retain(e);
-            }
-
-            // Rule 2: swap number left
-            if (left->type == EXPR_SYMBOL || left->type == EXPR_FUNC) {
-                if (right->type == EXPR_NUMBER) {
-                    Expr* swapped = expr_mul(right, left);
-                    expr_release(left);
-                    expr_release(right);
-                    return expr_simplify(swapped);
-                }
-            }
-
-            // Rule 1: x^a * x^b
-            if (left->type == EXPR_POW &&
-                right->type == EXPR_POW) {
-                // chek if bases match
-            }
-
-            return expr_mul(left, right);
-        }
-
-        case EXPR_POW: {
-            Expr* base = expr_simplify(e->data.binop.left);
-            Expr* exponent = expr_simplify(e->data.binop.right);
-            return expr_pow(base, exponent);
-        }
-
-        case EXPR_FUNC: {
-            Expr* arg = expr_simplify(e->data.func.arg);
-            return expr_func(e->data.func.func, arg);
-        }
-
-        default:
-            fprintf(stderr, "Unknown expression type in simplification.\n");
-            exit(1);
-    }
 }*/
 
 const char* func_type_name(FuncType f) {
@@ -566,7 +615,8 @@ const char* func_type_name(FuncType f) {
     }
 }
 
-void expr_print_tree_impl(const Expr* e, int indent, const char* prefix) {
+void expr_print_tree_impl(ExprArena* a, ExprIndex idx, int indent, const char* prefix) {
+    Expr *e = expr_at(a, idx);
     if (!e) {
         printf("%*s%s(NULL)\n", indent, "", prefix);
         return;
@@ -621,20 +671,20 @@ void expr_print_tree_impl(const Expr* e, int indent, const char* prefix) {
         case EXPR_ADD:
         case EXPR_MUL:
         case EXPR_POW:
-            expr_print_tree_impl(e->data.binop.left, indent + 4, "├── ");
-            expr_print_tree_impl(e->data.binop.right, indent + 4, "└── ");
+            expr_print_tree_impl(a, e->data.binop.left, indent + 4, "├── ");
+            expr_print_tree_impl(a, e->data.binop.right, indent + 4, "└── ");
             break;
 
         case EXPR_FUNC:
-            expr_print_tree_impl(e->data.func.arg, indent + 4, "└── ");
+            expr_print_tree_impl(a, e->data.func.arg, indent + 4, "└── ");
             break;
 
         case EXPR_DIFF:
-            expr_print_tree_impl(e->data.diff.inner, indent + 4, "└── ");
+            expr_print_tree_impl(a, e->data.diff.inner, indent + 4, "└── ");
             break;
 
         case EXPR_INT:
-            expr_print_tree_impl(e->data.integral.inner, indent + 4, "└── ");
+            expr_print_tree_impl(a, e->data.integral.inner, indent + 4, "└── ");
             break;
 
         default:
@@ -642,232 +692,255 @@ void expr_print_tree_impl(const Expr* e, int indent, const char* prefix) {
     }
 }
 
-void expr_print_tree(const Expr* e) {
-    expr_print_tree_impl(e, 0, "");
+void expr_print_tree(ExprArena* a, ExprIndex e) {
+    expr_print_tree_impl(a, e, 0, "");
 }
 
 
-Expr* expr_simplify(const Expr* e) {
-    if (!e) return NULL;
-
+ExprIndex expr_simplify(ExprArena* a, ExprIndex idx) {
+    //if (!e) return NULL;
+    Expr* e = expr_at(a,idx);
     switch (e->type) {
 
         case EXPR_NUMBER:
         case EXPR_SYMBOL:
-            return expr_copy(e);
+            return idx;
 
         case EXPR_ADD: {
-            Expr* left = expr_simplify(e->data.binop.left);
-            Expr* right = expr_simplify(e->data.binop.right);
+            ExprIndex left = expr_simplify(a, e->data.binop.left);
+            ExprIndex right = expr_simplify(a, e->data.binop.right);
 
             // number + number → number
-            if (left->type == EXPR_NUMBER && right->type == EXPR_NUMBER) {
-                Expr* result = expr_add_numbers(left, right);
-                expr_release(left);
-                expr_release(right);
+            if (expr_type(a,left) == EXPR_NUMBER && expr_type(a,right) == EXPR_NUMBER) {
+                ExprIndex result = expr_add_numbers(a, left, right);
+                //expr_release(left);
+                //expr_release(right);
                 return result;
             }
 
-            if (left->type == EXPR_NUMBER &&
-                mpq_cmp_ui(left->data.value, 0, 1) == 0) {
-                expr_release(left);
-                return expr_simplify(right);
+            if (expr_type(a,left) == EXPR_NUMBER &&
+                mpq_cmp_ui(*expr_value(a, left), 0, 1) == 0) {
+                //expr_release(e);
+                return expr_simplify(a,right);
             }
 
-            if (right->type == EXPR_NUMBER &&
-                mpq_cmp_ui(right->data.value, 0, 1) == 0) {
-                expr_release(right);
-                return expr_simplify(left);
+            if (expr_type(a,right) == EXPR_NUMBER &&
+                mpq_cmp_ui(*expr_value(a,right), 0, 1) == 0) {
+                //expr_release(eright);
+                return expr_simplify(a,left);
+            }
+
+            // reorder if left is symbol/function and right is number
+            if ((expr_type(a,left) == EXPR_SYMBOL || expr_type(a,left) == EXPR_FUNC ||
+                 expr_type(a,left) == EXPR_MUL    || expr_type(a,left) == EXPR_ADD) &&
+                expr_type(a,right) == EXPR_NUMBER) {
+                
+                ExprIndex swapped = expr_add(a,right, left);
+                //expr_release(left);
+                //expr_release(right);
+                return expr_simplify(a,swapped);
             }
 
             // a*x + b*x → (a+b)*x
-            if (left->type == EXPR_MUL &&
-                right->type == EXPR_MUL) {
-
-                Expr* x1 = left->data.binop.right;
-                Expr* x2 = right->data.binop.right;
-
-                if (expr_equal(x1, x2)) {
-                    Expr* a = left->data.binop.left;
-                    Expr* b = right->data.binop.left;
-
-                    Expr* sum = expr_simplify(expr_add(a, b));
-                    Expr* result = expr_mul(sum, expr_copy(x1));
-
-                    expr_release(left);
-                    expr_release(right);
+            if (expr_type(a, left) == EXPR_MUL &&
+                expr_type(a, right) == EXPR_MUL) {
+                
+                Expr* lmul = expr_at(a, left);
+                Expr* rmul = expr_at(a, right);
+                
+                ExprIndex c = lmul->data.binop.left;
+                ExprIndex x1 = lmul->data.binop.right;
+                
+                ExprIndex b = rmul->data.binop.left;
+                ExprIndex x2 = rmul->data.binop.right;
+                
+                if (expr_equal(a, x1, x2)) {
+                    ExprIndex sum = expr_simplify(a, expr_add(a, c, b));
+                    ExprIndex result = expr_mul(a, sum, x1);
                     return result;
                 }
             }
 
             // keep as ADD
-            Expr* result = expr_add(left, right);
+            ExprIndex result = expr_add(a, left, right);
             return result;
         }
 
         case EXPR_MUL: {
-            Expr* left = expr_simplify(e->data.binop.left);
-            Expr* right = expr_simplify(e->data.binop.right);
+            ExprIndex left = expr_simplify(a, e->data.binop.left);
+            ExprIndex right = expr_simplify(a, e->data.binop.right);
             
             // number * number → number
-            if (left->type == EXPR_NUMBER && right->type == EXPR_NUMBER) {
-                Expr* result = expr_mul_numbers(left, right);
-                expr_release(left);
-                expr_release(right);
+            if (expr_type(a,left) == EXPR_NUMBER && expr_type(a,right) == EXPR_NUMBER) {
+                ExprIndex result = expr_mul_numbers(a, left, right);
+                //expr_release(left);
+                //expr_release(right);
                 return result;
             }
-
-            if (left->type == EXPR_NUMBER) {
-                if (mpq_cmp_ui(left->data.value, 1, 1) == 0) {
+ 
+            if (expr_type(a,left) == EXPR_NUMBER) {
+                if (mpq_cmp_ui(*expr_value(a,left), 1, 1) == 0) {
                 // 1 * right → right
-                expr_release(left);
-                return expr_simplify(right);
+                //expr_release(left);
+                return expr_simplify(a, right);
             }
-            if (mpq_cmp_ui(left->data.value, 0, 1) == 0) {
+            if (mpq_cmp_ui(*expr_value(a,left), 0, 1) == 0) {
                 // 0 * anything → 0
-                expr_release(right);
-                return expr_number("0");
+                //expr_release(right);
+                return expr_number(a,"0");
             }
             }
 
             // reorder if left is symbol/function and right is number
-            if ((left->type == EXPR_SYMBOL || left->type == EXPR_FUNC) &&
-                right->type == EXPR_NUMBER) {
+            if ((expr_type(a,left) == EXPR_SYMBOL || expr_type(a,left) == EXPR_FUNC ||
+                 expr_type(a,left) == EXPR_MUL    || expr_type(a,left) == EXPR_ADD) &&
+                expr_type(a,right) == EXPR_NUMBER) {
                 
-                Expr* swapped = expr_mul(right, left);
-                expr_release(left);
-                expr_release(right);
-                return expr_simplify(swapped);
+                ExprIndex swapped = expr_mul(a,right, left);
+                //expr_release(left);
+                //expr_release(right);
+                return expr_simplify(a,swapped);
             }
+
+
+            // number * (number * expr) → (number * number) * expr
+            if (expr_type(a,left) == EXPR_NUMBER &&
+                (expr_type(a,right) == EXPR_MUL )) {
+                // multiply constants
+                ExprIndex rightleft = expr_left(a, right);
+                ExprIndex merged;
+                if( expr_type(a,rightleft) == EXPR_NUMBER)                
+                    merged = expr_mul_numbers(a,left, rightleft);
+                else 
+                    merged = expr_mul(a,left,rightleft);
+                
+                ExprIndex rightright = expr_right(a, right);
+                ExprIndex newmul = expr_mul(a, merged, rightright);
+                //expr_release(left);
+                //expr_release(right);
+                return expr_simplify(a,newmul);
+            }
+            // number * (number + expr) → (number * number) + (number * expr)
+            if (expr_type(a,left) == EXPR_NUMBER &&
+                (expr_type(a,right) == EXPR_ADD )) {
+                // multiply constants
+                ExprIndex rightleft = expr_left(a, right);
+                ExprIndex merged;
+                if( expr_type(a,rightleft) == EXPR_NUMBER)                
+                    merged = expr_mul_numbers(a,left, rightleft);
+                else 
+                    merged = expr_mul(a,left,rightleft);
+                
+                ExprIndex rightright = expr_mul(a,left,expr_right(a, right));
+                ExprIndex newmul = expr_add(a, merged, rightright);
+                //expr_release(left);
+                //expr_release(right);
+                return expr_simplify(a,newmul);
+            }
+            
             // x * x -> x^2
-            if (expr_equal(left, right)) {
-                Expr* exponent = expr_number("2");
-                Expr* result = expr_pow(left, exponent);
-                expr_release(right);
-                return expr_simplify(result);
+            if (expr_equal(a, left, right)) {
+                ExprIndex exponent = expr_number(a,"2");
+                ExprIndex result = expr_pow(a, left, exponent);
+                //expr_release(right);
+                return expr_simplify(a,result);
             }
-
+            
             // x^a * x^b → x^(a+b)
-            if (left->type == EXPR_POW &&
-                right->type == EXPR_POW) {
+            if (expr_type(a,left) == EXPR_POW &&
+                expr_type(a,right) == EXPR_POW) {
 
-                Expr* base1 = left->data.binop.left;
-                Expr* base2 = right->data.binop.left;
+                ExprIndex base1 = expr_left(a,left);
+                ExprIndex base2 = expr_left(a,right);
 
-                if (expr_equal(base1, base2)) {
-                    Expr* exp1 = left->data.binop.right;
-                    Expr* exp2 = right->data.binop.right;
+                if (expr_equal(a, base1, base2)) {
+                    ExprIndex exp1 = expr_right(a,left);
+                    ExprIndex exp2 = expr_right(a,right);
 
-                    Expr* exp_sum = expr_simplify(expr_add(exp1, exp2));
-                    Expr* result = expr_pow(expr_copy(base1), exp_sum);
+                    ExprIndex exp_sum = expr_simplify(a,expr_add(a,exp1, exp2));
+                    ExprIndex result = expr_pow(a, base1, exp_sum); //expr_copy(base1)
 
-                    expr_release(left);
-                    expr_release(right);
+                    //expr_release(left);
+                    //expr_release(right);
                     return result;
                 }
             }
 
-            // a * b * x -> c * x
-            // number * (number * expr) → (number * number) * expr
-            if (left->type == EXPR_NUMBER &&
-                right->type == EXPR_MUL &&
-                right->data.binop.left->type == EXPR_NUMBER) {
-                // multiply constants
-                Expr* merged = expr_mul_numbers(left, right->data.binop.left);
-                Expr* newmul = expr_mul(merged, expr_retain(right->data.binop.right));
-                expr_release(left);
-                expr_release(right);
-                return expr_simplify(newmul);
-            }
-
-            // a * x * b -> c * x
-            if (right->type == EXPR_NUMBER &&
-                left->type == EXPR_MUL &&
-                left->data.binop.right->type == EXPR_NUMBER) {
-                
-                // multiply constants
-                Expr* merged = expr_mul_numbers(right, left->data.binop.right);
-                Expr* newmul = expr_mul(merged, expr_retain(left->data.binop.left));
-                
-                expr_release(left);
-                expr_release(right);
-                return expr_simplify(newmul);
-            }
-
             // keep as MUL
-            Expr* result = expr_mul(left, right);
+            ExprIndex result = expr_mul(a, left, right);
             return result;
         }
 
         case EXPR_POW: {
-            Expr* base = expr_simplify(e->data.binop.left);
-            Expr* exponent = expr_simplify(e->data.binop.right);
+            ExprIndex base = expr_simplify(a,e->data.binop.left);
+            ExprIndex exponent = expr_simplify(a,e->data.binop.right);
             
-            if (exponent->type == EXPR_NUMBER) {
-                if (mpq_cmp_ui(exponent->data.value, 0, 1) == 0) {
+            if (expr_type(a, exponent) == EXPR_NUMBER) {
+                if (mpq_cmp_ui(*expr_value(a, exponent), 0, 1) == 0) {
                     // x^0 = 1
-                    expr_release(base);
-                    expr_release(exponent);
-                    return expr_number("1");
+                    //expr_release(base);
+                    //expr_release(exponent);
+                    return expr_number(a, "1");
                 }
-                if (mpq_cmp_ui(exponent->data.value, 1, 1) == 0) {
+                if (mpq_cmp_ui(*expr_value(a, exponent), 1, 1) == 0) {
                     // x^1 = x
-                    expr_release(exponent);
-                    return expr_simplify(base);
+                    //expr_release(exponent);
+                    return expr_simplify(a, base);
                 }
             }
             
-            if (base->type == EXPR_NUMBER) {
-                if (mpq_cmp_ui(base->data.value, 0, 1) == 0) {
+            if (expr_type(a,base) == EXPR_NUMBER) {
+                if (mpq_cmp_ui(*expr_value(a,base), 0, 1) == 0) {
                     // 0^x = 0
-                    expr_release(exponent);
-                    return expr_number("0");
+                    //expr_release(exponent);
+                    return expr_number(a,"0");
                 }
-                if (mpq_cmp_ui(base->data.value, 1, 1) == 0) {
+                if (mpq_cmp_ui(*expr_value(a,base), 1, 1) == 0) {
                     // 1^x = 1
-                    expr_release(exponent);
-                    return expr_number("1");
+                    //expr_release(exponent);
+                    return expr_number(a,"1");
                 }
             }
 
-            /*if(base->type==EXPR_NUMBER && exponent->type==EXPR_NUMBER) {
-                Expr* result = expr_mul_numbers(base, exponent);
-                expr_release(base);
-                expr_release(exponent);
-                return result;
-            }*/
-            return expr_pow(base, exponent);
+            //if(base->type==EXPR_NUMBER && exponent->type==EXPR_NUMBER) {
+            //    Expr* result = expr_mul_numbers(base, exponent);
+            //    expr_release(base);
+            //    expr_release(exponent);
+            //    return result;
+            //}
+            
+            return expr_pow(a, base, exponent);
         }
-
+        
         case EXPR_FUNC: {
-            Expr* arg = expr_simplify(e->data.func.arg);
-            return expr_func(e->data.func.func, arg);
+            ExprIndex arg = expr_simplify(a, e->data.func.arg);
+            return expr_func(a, e->data.func.func, arg);
         }
 
         case EXPR_DIFF: {
-            const Expr* inner = e->data.diff.inner;
+            ExprIndex inner = e->data.diff.inner;
             const char* var = e->data.diff.var;
-
-            Expr* simplified_inner = expr_simplify(inner);
+            
+            ExprIndex simplified_inner = expr_simplify(a, inner);
 
             // Try to fully evaluate the derivative using existing engine
-            Expr* attempted = expr_differentiate(simplified_inner, var);
-            if (attempted) return attempted;
-                
+            ExprIndex attempted = expr_differentiate(a, simplified_inner, var);
+            if (attempted != INVALID_INDEX) return expr_simplify(a,attempted);
+               
             // Return symbolic diff since it couldn’t be evaluated
-            return expr_diff(simplified_inner, var);
+            return expr_diff(a, simplified_inner, var);
         }
 
         case EXPR_INT: {
-            const Expr* inner = e->data.integral.inner;
+            ExprIndex inner = e->data.integral.inner;
             const char* var = e->data.integral.var;
 
-            Expr* simp_inner = expr_simplify(inner);
+            ExprIndex simp_inner = expr_simplify(a, inner);
 
             // Try to evaluate with existing integration engine
-            Expr* attempted = expr_integrate(simp_inner, var);
-            if (attempted) return expr_simplify(attempted);
-            return expr_int(simp_inner, var);
+            ExprIndex attempted = expr_integrate(a, simp_inner, var);
+            if (attempted != INVALID_INDEX) return expr_simplify(a, attempted);
+            return expr_int(a, simp_inner, var);
             
         }
 
@@ -876,7 +949,7 @@ Expr* expr_simplify(const Expr* e) {
             exit(1);
     }
 }
-
+/*
 Expr* expr_copy(const Expr* e) {
     if (!e) return NULL;
 
@@ -948,15 +1021,20 @@ Expr* expr_copy(const Expr* e) {
             exit(1);
     }
 }
+*/
+int expr_equal(const ExprArena* arena, ExprIndex a_idx, ExprIndex b_idx) {
+    if (a_idx == b_idx) return 1;
+    if (a_idx < 0 || b_idx < 0) return 0;
 
-int expr_equal(const Expr* a, const Expr* b) {
-    if (a == b) return 1;
+    const Expr* a = expr_at(arena, a_idx);
+    const Expr* b = expr_at(arena, b_idx);
     if (!a || !b) return 0;
+
     if (a->type != b->type) return 0;
 
     switch (a->type) {
         case EXPR_NUMBER:
-            return (mpq_cmp(a->data.value, b->data.value) == 0);
+            return mpq_cmp(a->data.value, b->data.value) == 0;
 
         case EXPR_SYMBOL:
             return strcmp(a->data.name, b->data.name) == 0;
@@ -964,62 +1042,74 @@ int expr_equal(const Expr* a, const Expr* b) {
         case EXPR_ADD:
         case EXPR_MUL:
         case EXPR_POW:
-            return expr_equal(a->data.binop.left, b->data.binop.left) &&
-                   expr_equal(a->data.binop.right, b->data.binop.right);
+            return expr_equal(arena, a->data.binop.left, b->data.binop.left) &&
+                   expr_equal(arena, a->data.binop.right, b->data.binop.right);
 
         case EXPR_FUNC:
-            return (a->data.func.func == b->data.func.func) &&
-                   expr_equal(a->data.func.arg, b->data.func.arg);
+            return a->data.func.func == b->data.func.func &&
+                   expr_equal(arena, a->data.func.arg, b->data.func.arg);
+
+        case EXPR_DIFF:
+            return strcmp(a->data.diff.var, b->data.diff.var) == 0 &&
+                   expr_equal(arena, a->data.diff.inner, b->data.diff.inner);
+
+        case EXPR_INT:
+            return strcmp(a->data.integral.var, b->data.integral.var) == 0 &&
+                   expr_equal(arena, a->data.integral.inner, b->data.integral.inner);
 
         default:
-            fprintf(stderr, "Unknown expression type in expr_equal.\n");
+            fprintf(stderr, "Unknown expression type in expr_equal: %d\n", a->type);
             exit(1);
     }
 }
 
-Expr* expr_substitute(const Expr* e, const char* symbol_name, const char* value_str) {
-    if (!e) return NULL;
+
+ExprIndex expr_substitute(ExprArena* a, ExprIndex idx, const char* symbol_name, const char* value_str){
+    Expr* e = expr_at(a,idx);
+    if (!e) return INVALID_INDEX;
 
     switch (e->type) {
+      
         case EXPR_NUMBER:
-            return expr_copy(e);
-
+            return idx;
+  
         case EXPR_SYMBOL:
             if (strcmp(e->data.name, symbol_name) == 0) {
-                return expr_number(value_str);
+                return expr_number(a,value_str);
             } else {
-                return expr_copy(e);
+                return idx;
             }
 
         case EXPR_ADD: {
-            Expr* left = expr_substitute(e->data.binop.left, symbol_name, value_str);
-            Expr* right = expr_substitute(e->data.binop.right, symbol_name, value_str);
-            return expr_add(left, right);
+            ExprIndex left  = expr_substitute(a, expr_left(a,idx) , symbol_name, value_str);
+            ExprIndex right = expr_substitute(a, expr_right(a,idx), symbol_name, value_str);
+            return expr_add(a, left, right);
         }
 
         case EXPR_MUL: {
-            Expr* left = expr_substitute(e->data.binop.left, symbol_name, value_str);
-            Expr* right = expr_substitute(e->data.binop.right, symbol_name, value_str);
-            return expr_mul(left, right);
+            ExprIndex left  = expr_substitute(a, expr_left(a,idx) , symbol_name, value_str);
+            ExprIndex right = expr_substitute(a, expr_right(a,idx), symbol_name, value_str);
+            return expr_mul(a, left, right);
         }
 
         case EXPR_POW: {
-            Expr* base = expr_substitute(e->data.binop.left, symbol_name, value_str);
-            Expr* exponent = expr_substitute(e->data.binop.right, symbol_name, value_str);
-            return expr_pow(base, exponent);
+            ExprIndex base = expr_substitute(a,expr_left(a,idx), symbol_name, value_str);
+            ExprIndex exponent = expr_substitute(a,expr_right(a,idx), symbol_name, value_str);
+            return expr_pow(a, base, exponent);
         }
 
         case EXPR_FUNC: {
-            Expr* arg = expr_substitute(e->data.func.arg, symbol_name, value_str);
-            return expr_func(e->data.func.func, arg);
+            ExprIndex arg = expr_substitute(a, expr_arg(a,idx), symbol_name, value_str);
+            return expr_func(a, expr_ftype(a,idx), arg);
         }
-
+ 
         default:
             fprintf(stderr, "Unknown expression type in expr_substitute.\n");
             exit(1);
     }
+           
 }
-
+/*
 Expr* expr_eval(const Expr* e, 
                 const char* symbol_name, 
                 const char* value_str) {
@@ -1116,14 +1206,17 @@ Expr* expr_eval(const Expr* e,
             exit(1);
     }
 }
-
-double expr_eval_numeric(const Expr* e) {
+*/
+double expr_eval_numeric(ExprArena* a, ExprIndex idx) {
+    Expr* e = expr_at(a,idx);
     if (!e) {
         fprintf(stderr, "expr_eval_numeric called with NULL expression.\n");
         exit(1);
     }
+    
 
     switch (e->type) {
+        
         case EXPR_NUMBER:
             return mpq_get_d(e->data.value);
 
@@ -1132,25 +1225,25 @@ double expr_eval_numeric(const Expr* e) {
             exit(1);
 
         case EXPR_ADD: {
-            double left = expr_eval_numeric(e->data.binop.left);
-            double right = expr_eval_numeric(e->data.binop.right);
+            double left  = expr_eval_numeric(a, expr_left(a,idx) );
+            double right = expr_eval_numeric(a, expr_right(a,idx));
             return left + right;
         }
 
         case EXPR_MUL: {
-            double left = expr_eval_numeric(e->data.binop.left);
-            double right = expr_eval_numeric(e->data.binop.right);
+            double left  = expr_eval_numeric(a, expr_left(a,idx) );
+            double right = expr_eval_numeric(a, expr_right(a,idx));
             return left * right;
         }
 
         case EXPR_POW: {
-            double base = expr_eval_numeric(e->data.binop.left);
-            double exponent = expr_eval_numeric(e->data.binop.right);
+            double base     = expr_eval_numeric(a, expr_left(a,idx) );
+            double exponent = expr_eval_numeric(a, expr_right(a,idx));
             return pow(base, exponent);
         }
 
         case EXPR_FUNC: {
-            double arg_val = expr_eval_numeric(e->data.func.arg);
+            double arg_val = expr_eval_numeric(a, expr_arg(a,idx));
             switch (e->data.func.func) {
                 case FUNC_SIN: return sin(arg_val);
                 case FUNC_COS: return cos(arg_val);
@@ -1166,48 +1259,51 @@ double expr_eval_numeric(const Expr* e) {
             fprintf(stderr, "Unknown expression type in expr_eval_numeric.\n");
             exit(1);
     }
+            
 }
 
-Expr* expr_differentiate(const Expr* e, const char* var_name) {
-    if (!e) return NULL;
+ExprIndex expr_differentiate(ExprArena* a, ExprIndex idx, const char* var_name) {
+    Expr* e = expr_at(a, idx);
+    if (!e) return INVALID_INDEX;
 
     switch (e->type) {
         case EXPR_NUMBER:
-            return expr_number("0");
+            return expr_number(a, "0");
 
         case EXPR_SYMBOL:
             if (strcmp(e->data.name, var_name) == 0) {
-                return expr_number("1");
+                return expr_number(a,"1");
             } else {
-                return expr_number("0");
+                return expr_number(a,"0");
             }
 
         case EXPR_ADD: {
-            Expr* left = expr_differentiate(e->data.binop.left, var_name);
-            Expr* right = expr_differentiate(e->data.binop.right, var_name);
-            return expr_add(left, right);
+            ExprIndex left = expr_differentiate(a,e->data.binop.left, var_name);
+            ExprIndex right = expr_differentiate(a,e->data.binop.right, var_name);
+            return expr_add(a,left, right);
         }
 
         case EXPR_MUL: {
-            Expr* f = e->data.binop.left;
-            Expr* g = e->data.binop.right;
+            ExprIndex f = e->data.binop.left;
+            ExprIndex g = e->data.binop.right;
 
-            Expr* df = expr_differentiate(f, var_name);
-            Expr* dg = expr_differentiate(g, var_name);
+            ExprIndex df = expr_differentiate(a,f, var_name);
+            ExprIndex dg = expr_differentiate(a,g, var_name);
 
-            Expr* left_term = expr_mul(df, expr_copy(g));
-            Expr* right_term = expr_mul(expr_copy(f), dg);
+            ExprIndex left_term = expr_mul(a,df, g);
+            ExprIndex right_term = expr_mul(a,f, dg);
 
-            return expr_add(left_term, right_term);
+            return expr_add(a, left_term, right_term);
         }
 
-        case EXPR_POW: {
-            Expr* base = e->data.binop.left;
-            Expr* exponent = e->data.binop.right;
 
-            if (exponent->type == EXPR_NUMBER &&
-                base->type == EXPR_SYMBOL &&
-                strcmp(base->data.name, var_name) == 0) {
+        case EXPR_POW: {
+            ExprIndex base = e->data.binop.left;
+            ExprIndex exponent = e->data.binop.right;
+
+            if (expr_type(a,exponent) == EXPR_NUMBER &&
+                expr_type(a,base) == EXPR_SYMBOL &&
+                strcmp(expr_name(a,base), var_name) == 0) {
                 // d/dx x^n = n * x^(n-1)
                 mpq_t new_exp;
                 mpq_init(new_exp);
@@ -1216,87 +1312,66 @@ Expr* expr_differentiate(const Expr* e, const char* var_name) {
                 mpq_init(one);
                 mpq_set_ui(one, 1, 1);
 
-                mpq_sub(new_exp, exponent->data.value, one);
+                mpq_sub(new_exp, *expr_value(a,exponent), one);
 
-                mpq_clear(one);
-
-                Expr* new_exp_expr = malloc(sizeof(Expr));
-                new_exp_expr->type = EXPR_NUMBER;
-                new_exp_expr->refcount = 1;
-                mpq_init(new_exp_expr->data.value);
-                mpq_set(new_exp_expr->data.value, new_exp);
-
-                Expr* pow_expr = expr_pow(expr_copy(base), new_exp_expr);
-
-                Expr* coeff = malloc(sizeof(Expr));
-                coeff->type = EXPR_NUMBER;
-                coeff->refcount = 1;
-                mpq_init(coeff->data.value);
-                mpq_set(coeff->data.value, exponent->data.value);
-
+                ExprIndex new_exp_idx = expr_number_mpq(a, new_exp);
                 mpq_clear(new_exp);
 
-                return expr_mul(coeff, pow_expr);
+                ExprIndex x_pow_n_minus_1 = expr_pow(a, base, new_exp_idx);
+                ExprIndex coeff_n = expr_number_mpq(a, *expr_value(a,exponent));
+
+                return expr_mul(a, coeff_n, x_pow_n_minus_1);
+
+
             } else {
                 fprintf(stderr, "Power rule for general expressions not implemented yet.\n");
-                return NULL;
+                return INVALID_INDEX;
             }
         }
 
         case EXPR_FUNC: {
-            Expr* u = e->data.func.arg;
-            Expr* du = expr_differentiate(u, var_name);
+            ExprIndex u = e->data.func.arg;
+            ExprIndex du = expr_differentiate(a,u, var_name);
 
             switch (e->data.func.func) {
                 case FUNC_SIN: {
-                    Expr* cos_u = expr_func(FUNC_COS, expr_copy(u));
-                    return expr_mul(cos_u, du);
+                    ExprIndex cos_u = expr_func(a, FUNC_COS, u);
+                    return expr_mul(a, cos_u, du);
                 }
                 case FUNC_COS: {
-                    Expr* sin_u = expr_func(FUNC_SIN, expr_copy(u));
-                    Expr* neg_sin_u = expr_mul(expr_number("-1"), sin_u);
-                    return expr_mul(neg_sin_u, du);
+                    ExprIndex sin_u = expr_func(a, FUNC_SIN, u);
+                    ExprIndex neg_sin_u = expr_mul(a,expr_number(a,"-1"), sin_u);
+                    return expr_mul(a,neg_sin_u, du);
                 }
                 case FUNC_EXP: {
-                    Expr* exp_u = expr_func(FUNC_EXP, expr_copy(u));
-                    return expr_mul(exp_u, du);
+                    ExprIndex exp_u = expr_func(a,FUNC_EXP, u);
+                    return expr_mul(a,exp_u, du);
                 }
                 case FUNC_LOG: {
-                    Expr* reiprocal = expr_pow(expr_copy(u), expr_number("-1"));
-                    return expr_mul(reiprocal, du);
+                    ExprIndex reiprocal = expr_pow(a,u, expr_number(a,"-1"));
+                    return expr_mul(a,reiprocal, du);
                 }
                 default:
                     fprintf(stderr, "Unknown function in differentiation.\n");
                     exit(1);
             }
         }
-
         default:
             fprintf(stderr, "Unknown expression type in differentiation.\n");
+            expr_print_tree(a,idx);
             exit(1);
     }
 }
 
-Expr* expr_number_mpq(mpq_t value) {
-    Expr* num_expr;
-    num_expr = (Expr*) malloc(sizeof(Expr));
-    if (!num_expr) {
-        fprintf(stderr, "Out of memory\n");
-        exit(1);
-    }
-    num_expr->type = EXPR_NUMBER;
-    num_expr->refcount = 1;
-
-    mpq_init(num_expr->data.value);
-
-    mpq_canonicalize(value);
-    mpq_set(num_expr->data.value, value);
-
-    mpq_clear(value);
-
-    return num_expr;
+ExprIndex expr_number_mpq(ExprArena* a, const mpq_t value) {
+    ExprIndex idx = expr_arena_alloc(a);
+    Expr* e = expr_at(a,idx);
+    e->type = EXPR_NUMBER;
+    mpq_init(e->data.value);
+    mpq_set(e->data.value, value);
+    return idx;
 }
-
+/*
 void mpq_add_ui(mpq_t rop, const mpq_t op1, unsigned long int op2) {
     mpq_t temp;
     mpq_init(temp);
@@ -1304,96 +1379,101 @@ void mpq_add_ui(mpq_t rop, const mpq_t op1, unsigned long int op2) {
     mpq_add(rop, op1, temp);
     mpq_clear(temp);
 }
-
-Expr* expr_integrate(const Expr* e, const char* var_name) {
-    if (!e) return NULL;
+*/
+ExprIndex expr_integrate(ExprArena* a, const ExprIndex idx, const char* var_name){
+    Expr* e = expr_at(a,idx);
+    if (!e) return INVALID_INDEX;
 
     switch (e->type) {
+        
         case EXPR_NUMBER:
-            return expr_mul(expr_retain(e),expr_symbol(var_name));
+            return expr_mul(a,idx,expr_symbol(a, var_name));
 
         case EXPR_SYMBOL:
             if (strcmp(e->data.name, var_name) == 0) {
-                return expr_mul(expr_number("1/2"),expr_pow(expr_symbol(var_name), expr_number("2")));
+                ExprIndex res = expr_mul(a,expr_number(a,"1/2"),expr_pow(a,expr_symbol(a,var_name), expr_number(a,"2")));
+                expr_print_tree(a,res);
+                return res;
             } else {
-                return expr_mul(expr_retain(e),expr_symbol(var_name));
+                return expr_mul(a,idx,expr_symbol(a,var_name));
             }
 
         case EXPR_ADD: {
-            Expr* left = expr_integrate(e->data.binop.left, var_name);
-            Expr* right = expr_integrate(e->data.binop.right, var_name);
-            return expr_add(left, right);
+            ExprIndex left = expr_integrate(a,e->data.binop.left, var_name);
+            ExprIndex right = expr_integrate(a,e->data.binop.right, var_name);
+            return expr_add(a,left, right);
         }
 
         case EXPR_MUL: {
-            Expr* f = e->data.binop.left;
-            Expr* g = e->data.binop.right;
+            ExprIndex f = e->data.binop.left;
+            ExprIndex g = e->data.binop.right;
 
-            if (g->type == EXPR_NUMBER) {
-                Expr* inner = expr_integrate(f, var_name);
-                return expr_mul(expr_retain(g), inner);
-            }
+           /* if (expr_type(a,g) == EXPR_NUMBER) {
+                ExprIndex inner = expr_integrate(a, f, var_name);
+                return expr_mul(a,g, inner);
+            }*/
 
-            if (f->type == EXPR_NUMBER) {
-                Expr* inner = expr_integrate(g, var_name);
-                return expr_mul(expr_retain(f), inner);
+            if (expr_type(a,f) == EXPR_NUMBER) {
+                ExprIndex inner = expr_integrate(a, g, var_name);
+                return expr_mul(a,f, inner);
             }
 
             break; // product rule not implemented
-            /*
-            Expr* sf = expr_integrate(f, var_name);
-            Expr* dg = expr_diff(g, var_name);
 
-            Expr* left_term = expr_mul(expr_retain(sf), expr_retain(g));
-            Expr* right_term = expr_mul(expr_retain(sf), expr_retain(dg));
-
-            return expr_add(left_term, right_term);*/
         }
 
         case EXPR_POW: {
-            Expr* base = e->data.binop.left;
-            Expr* exponent = e->data.binop.right;
-
-            if (exponent->type == EXPR_NUMBER &&
-                base->type == EXPR_SYMBOL &&
-                strcmp(base->data.name, var_name) == 0) {
-                // d/dx x^n = n * x^(n-1)
-
-                Expr* one = expr_number("1");
-                Expr* new_exp_expr = expr_simplify(expr_add(expr_retain(exponent),one));
-                //expr_release(one);
-                Expr* pow_expr = expr_pow(expr_copy(base), new_exp_expr);
-
-                Expr* coeff = expr_div(expr_copy(one),expr_retain(new_exp_expr));
-                expr_release(one);
-
-                return expr_mul(coeff, pow_expr);
+            ExprIndex base = e->data.binop.left;
+            ExprIndex exponent = e->data.binop.right;
+        
+            if (expr_type(a, exponent) == EXPR_NUMBER &&
+                expr_type(a, base) == EXPR_SYMBOL &&
+                strcmp(expr_name(a, base), var_name) == 0) {
+                
+                // Create one: 1/1
+                ExprIndex one = expr_number(a, "1");
+                
+                // new_exp = exponent + 1
+                ExprIndex new_exp = expr_add(a, exponent, one);
+                new_exp = expr_simplify(a, new_exp);
+                
+                // x^(n+1)
+                ExprIndex pow_expr = expr_pow(a, base, new_exp);
+                
+                // 1 / (n+1)
+                ExprIndex coeff = expr_div(a, one, new_exp);
+                
+                //expr_release(a, one);
+                //expr_release(a, new_exp);
+                
+                return expr_mul(a, coeff, pow_expr);
             } else {
                 fprintf(stderr, "Power rule for general expressions not implemented yet.\n");
-                return NULL;
+                return INVALID_INDEX;
             }
         }
 
+
         case EXPR_FUNC: {
-            Expr* u = e->data.func.arg;
+            ExprIndex u = e->data.func.arg;
             //Expr* du = expr_diff(u, var_name);
-            if (u->type == EXPR_SYMBOL && strcmp(u->data.name, var_name) == 0) {
+            if (expr_type(a,u) == EXPR_SYMBOL && strcmp(expr_name(a,u), var_name) == 0) {
                 switch (e->data.func.func) {
                     case FUNC_SIN: {
-                        Expr* cos_u = expr_func(FUNC_COS, expr_copy(u));
-                        Expr* neg_cos_u = expr_mul(expr_number("-1"), cos_u);
+                        ExprIndex cos_u = expr_func(a,FUNC_COS, u);
+                        ExprIndex neg_cos_u = expr_mul(a,expr_number(a,"-1"), cos_u);
                         return neg_cos_u;
                     }
                     case FUNC_COS: {
-                        Expr* sin_u = expr_func(FUNC_SIN, expr_copy(u));
+                        ExprIndex sin_u = expr_func(a,FUNC_SIN, u);
                         return sin_u;
                     }
                     case FUNC_EXP: {
-                        Expr* exp_u = expr_func(FUNC_EXP, expr_copy(u));
+                        ExprIndex exp_u = expr_func(a,FUNC_EXP, u);
                         return exp_u;
                     }
                     case FUNC_LOG: {
-                        Expr* reiprocal = expr_pow(expr_copy(u), expr_number("-1"));
+                        ExprIndex reiprocal = expr_pow(a,u, expr_number(a,"-1"));
                         return reiprocal;
                     }
                     default:
@@ -1406,16 +1486,16 @@ Expr* expr_integrate(const Expr* e, const char* var_name) {
 
         default:
             fprintf(stderr, "Unknown expression type in Integration.\n");
+            expr_print_tree(a,idx);
             exit(1);
     }
 
-    char* e_str = expr_to_string(e);
-    
-    fprintf(stderr, "Couldn't resolve integration for expression: %s.\n",e_str);
-    free(e_str); 
-    return NULL;
+    fprintf(stderr, "Couldn't resolve integration for expression: ");
+    expr_print(a,idx);
+    fprintf(stderr, "\n");
+    return INVALID_INDEX;
 }
-
+/*
 Expr* expr_neg(const Expr* a) {
     if (!a) return NULL;
 
@@ -1442,39 +1522,48 @@ Expr* expr_sub(const Expr* a, const Expr* b) {
     expr_release(neg_b);
     return expr_simplify(result);
 }
+*/
+ExprIndex expr_div(ExprArena* a, ExprIndex num, ExprIndex den) {
+    if (num == INVALID_INDEX || den == INVALID_INDEX)
+        return INVALID_INDEX;
 
-Expr* expr_div(const Expr* a, const Expr* b) {
-    if (!a || !b) return NULL;
+    Expr* en = expr_at(a, num);
+    Expr* ed = expr_at(a, den);
 
-    if (b->type == EXPR_NUMBER && mpq_cmp_ui(b->data.value, 1, 1) == 0) {
-        return expr_retain(a); // a / 1 = a
+    // a / 1 = a
+    if (expr_type(a, den) == EXPR_NUMBER &&
+        mpq_cmp_ui(*expr_value(a, den), 1, 1) == 0) {
+        return num;
     }
 
-    // 0 / b = 0, for any b ≠ 0
-    if (a->type == EXPR_NUMBER && mpq_sgn(a->data.value) == 0) {
-        return expr_number("0");
+    // 0 / b = 0 (as long as b ≠ 0)
+    if (expr_type(a, num) == EXPR_NUMBER &&
+        mpq_sgn(*expr_value(a, num)) == 0) {
+        return expr_number(a, "0");
     }
 
-    // a / a = 1, for non-zero a
-    if (expr_equal(a, b)) {
-        return expr_number("1");
+    // a / a = 1
+    if (expr_equal(a, num, den)) {
+        return expr_number(a, "1");
     }
 
-    if (a->type == EXPR_NUMBER && b->type == EXPR_NUMBER) {
+    // both numeric → directly divide
+    if (expr_type(a, num) == EXPR_NUMBER &&
+        expr_type(a, den) == EXPR_NUMBER) {
         mpq_t q;
         mpq_init(q);
-        mpq_div(q, a->data.value, b->data.value);
-        Expr* result = expr_number_mpq(q); // takes ownership or copies
-        //mpq_clear(q);
+        mpq_div(q, *expr_value(a, num), *expr_value(a, den));
+        ExprIndex result = expr_number_mpq(a, q);
+        mpq_clear(q);
         return result;
     }
 
-    // a / b = a * b^(-1)
-    Expr* inverse = expr_pow(expr_retain(b), expr_number("-1"));
-    Expr* result = expr_mul(expr_retain(a), inverse);
-    expr_release(inverse);
-    return expr_simplify(result);
+    // a / b → a * b^(-1)
+    ExprIndex minus_one = expr_number(a, "-1");
+    ExprIndex reciprocal = expr_pow(a, den, minus_one);
+    ExprIndex result = expr_mul(a, num, reciprocal);
+    //expr_release(a, reciprocal);
+    return expr_simplify(a, result);
 }
-
 
 #endif // CYMCALC_IMPLEMENTATION

@@ -1,9 +1,11 @@
 # Ignore exec file
-a.exe
+*.exe
 # Editor trash
 .vscode
 # GMP folder
 GMP/
 GMP/*
+# we do not talk about this
+directory of shame/
 # My build bat script
 build.bat

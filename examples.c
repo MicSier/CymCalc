@@ -17,99 +17,144 @@ int main() {
 
     setup_utf8_console();
 
+    ExprArena a;
+    expr_arena_init(&a);
     printf("----------------------------------------------------\n");
-    printf(" Example 1: Symbolic differentiation and integration\n");
+    printf(" Example 1: Number arithmetic\n");
     printf("----------------------------------------------------\n");
+    {
+        ExprIndex r = expr_add(&a, expr_number(&a,"3"), expr_number(&a,"5"));
+        expr_print(&a, r);
+        printf(" = ");
+        ExprIndex rs = expr_simplify(&a, r);
+        expr_print(&a, rs);
+        printf("\n");
+    }
+    {
+        ExprIndex t = expr_mul(&a, expr_add(&a, expr_number(&a,"3"), expr_number(&a,"-7/20")), expr_number(&a,"5"));
+        expr_print(&a, t);
+        printf(" = ");
+        ExprIndex ts = expr_simplify(&a, t);
+        expr_print(&a, ts);
+        printf("\n");
+    }
+    {
+        ExprIndex t = expr_mul(&a, expr_mul(&a, expr_number(&a,"3"), expr_number(&a,"-7/20")), expr_number(&a,"5"));
+        expr_print(&a, t);
+        printf(" = ");
+        ExprIndex ts = expr_simplify(&a, t);
+        expr_print(&a, ts);
+        printf("\n");
+    }
+    printf("----------------------------------------------------\n");
+    printf(" Example 2: Number and symbol arithmetic\n");
+    printf("----------------------------------------------------\n");
+    {
+        ExprIndex m = expr_mul(&a, expr_add(&a, expr_symbol(&a,"x"), expr_number(&a,"-7/20")), expr_number(&a,"5"));
+        expr_print(&a, m);
+        printf(" = ");
 
-    Expr* x = expr_symbol("x");
-    Expr* x3 = expr_pow(expr_retain(x), expr_number("3"));
-    Expr* sinx = expr_func(FUNC_SIN, expr_retain(x));
-    Expr* f = expr_add(x3, sinx);
+        ExprIndex ms = expr_simplify(&a, m);
+        expr_print(&a, ms);
+        printf("\n");
+    }
+    {
+        ExprIndex m = expr_mul(&a, expr_mul(&a, expr_symbol(&a,"x"), expr_number(&a,"-7/20")), expr_number(&a,"5"));
+        expr_print(&a, m);
+        printf(" = ");
+        ExprIndex ms = expr_simplify(&a, m);
+        expr_print(&a, ms);
+        printf("\n");
+    }
 
-    char* f_str = expr_to_string(f);
-    printf("f(x) = %s\n", f_str);
+    printf("----------------------------------------------------\n");
+    printf(" Example 3: Symbolic differentiation and integration\n");
+    printf("----------------------------------------------------\n");
+    {
+        ExprIndex x = expr_symbol(&a,"x");
+        ExprIndex x3 = expr_pow(&a, x, expr_number(&a,"3"));
+        ExprIndex sinx = expr_func(&a, FUNC_SIN, x);
+        ExprIndex f = expr_add(&a, x3, sinx);
 
-    Expr* df = expr_diff(f, "x");  
-    Expr* df_sim = expr_simplify(df);       
+        printf("f(x) = ");
+        expr_print(&a, f);
+        printf("\n");
+        ExprIndex df = expr_diff(&a, f, "x");  
+        ExprIndex df_sim = expr_simplify(&a, df); 
 
-    char* df_str = expr_to_string(df);
-    char* dfs_str = expr_to_string(df_sim);
-    printf("%s = %s\n", df_str, dfs_str);
-    Expr* Sf = expr_int(f, "x"); 
-    Expr* Sf_sim = expr_simplify(Sf);        
+        printf("f'(x) = ");
+        expr_print(&a, df);
+        printf(" = ");
+        expr_print(&a, df_sim);
+        printf("\n");
+        
+        
+        ExprIndex Sf = expr_int(&a,f, "x"); 
+        ExprIndex Sf_sim = expr_simplify(&a,Sf); 
+        
+        printf("∫f(x)dx = ");
+        expr_print(&a, Sf);
+        printf(" = ");
+        expr_print(&a, Sf_sim);
+        printf("\n");
 
-    char* Sf_str = expr_to_string(Sf);
-    char* Sfs_str = expr_to_string(Sf_sim);
-
-    printf("%s = %s\n", Sf_str, Sfs_str);
-    Expr* Sdf = expr_int(df, "x"); 
-    Expr* Sdf_sim = expr_simplify(expr_int(df_sim,"x"));   
-    char* Sdf_str = expr_to_string(Sdf);
-    char* Sdfs_str = expr_to_string(Sdf_sim);
-    char* comp_str = (expr_equal(f,Sdf_sim))?"TRUE":"FALSE";
-    printf("%s = %s, so we have f(x)==Sf'(x)dx being %s\n",Sdf_str, Sdfs_str, comp_str);
-    free(df_str);
-
-    expr_release(df);
-    expr_release(f);
-    expr_release(Sf);
-    expr_release(x);
-
+        ExprIndex Sdf = expr_int(&a,df, "x"); 
+        ExprIndex Sdf_sim = expr_simplify(&a,Sdf);   
+        expr_print(&a,Sdf);
+        printf(" = ");
+        expr_print(&a,Sdf_sim);
+        char* comp_str = (expr_equal(&a,f,Sdf_sim))?"TRUE":"FALSE";
+        printf(", so we have f(x)==∫f'(x)dx being %s\n", comp_str);
+    }
     printf("--------------------------------------------\n");
-    printf(" Example 2: Evaluation\n");
+    printf(" Example 4: Evaluation\n");
     printf("--------------------------------------------\n");
 
-    Expr* y = expr_symbol("y");
-    Expr* three_half = expr_number("3/2");
-    Expr* term1 = expr_mul(three_half, expr_retain(y));
-    Expr* logy = expr_func(FUNC_LOG, expr_retain(y));
-    Expr* g = expr_add(term1, logy);
+    ExprIndex y = expr_symbol(&a,"y");
+    ExprIndex three_half = expr_number(&a,"3/2");
+    ExprIndex term1 = expr_mul(&a,three_half, y);
+    ExprIndex logy = expr_func(&a,FUNC_LOG, y);
+    ExprIndex g = expr_add(&a,term1, logy);
 
-    char* g_str = expr_to_string(g);
-    printf("g(y) = %s\n", g_str);
-    free(g_str);
+    printf("g(y) = ");
+    expr_print(&a,g);
+    printf("\n");
 
     // Evaluate g(y) at y = 4
-    Expr* g_val = expr_simplify(expr_substitute(g, "y", "4"));
-    char* g_val_str = expr_to_string(g_val);
-    printf("g(4) = %s = %f \n", g_val_str, expr_eval_numeric(g_val));
-    free(g_val_str);
+    ExprIndex g_val = expr_simplify(&a,expr_substitute(&a, g, "y", "4"));
+    printf("g(4) = ");
+    expr_print(&a,g_val);
+    printf("= %f \n", expr_eval_numeric(&a,g_val));
 
-    expr_release(g_val);
-    expr_release(g);
-    expr_release(y);
 
     printf("--------------------------------------------\n");
     printf(" Example 3: Nested expressions\n");
     printf("--------------------------------------------\n");
+    {
+        ExprIndex x = expr_symbol(&a,"x");
+        ExprIndex x2 = expr_pow(&a, x, expr_number(&a,"2"));
+        ExprIndex exp_x2 = expr_func(&a, FUNC_EXP, x2);
+        ExprIndex sinx = expr_func(&a, FUNC_SIN, x);
+        ExprIndex h = expr_mul(&a, sinx, exp_x2);
 
-    x = expr_symbol("x");
-    Expr* x2 = expr_pow(expr_retain(x), expr_number("2"));
-    Expr* exp_x2 = expr_func(FUNC_EXP, x2);
-    sinx = expr_func(FUNC_SIN, expr_retain(x));
-    Expr* h = expr_mul(sinx, exp_x2);
+        printf("h(x) = ");
+        expr_print(&a, h);
+        printf("\n");
 
-    char* h_str = expr_to_string(h);
-    printf("h(x) = %s\n", h_str);
-    free(h_str);
+        ExprIndex dh = expr_simplify(&a,expr_diff(&a,h, "x"));
+        
+        printf("h'(x) = ");
+        expr_print(&a, dh);
+        printf("\n");
 
-    // Differentiate h(x)
-    Expr* dh = expr_simplify(expr_diff(h, "x"));
-    char* dh_str = expr_to_string(dh);
-    printf("h'(x) = %s\n", dh_str);
+        ExprIndex Sh = expr_simplify(&a,expr_int(&a,h, "x"));         
 
-    Expr* Sh = expr_simplify(expr_int(h, "x"));         
+        printf("∫h(x)dx = ");
+        expr_print(&a, Sh);
+        printf("\n");
+        
 
-    dh_str = expr_to_string(Sh);
-    printf("Sh(x) = %s\n", dh_str);
-    free(dh_str);   
 
-    expr_release(dh);
-    expr_release(h);
-    expr_release(x);
-    expr_release(x2);
-    expr_release(exp_x2);
-    expr_release(sinx);
-
+    }
     return 0;
 }
