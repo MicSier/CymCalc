@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #define CYMCALC_IMPLEMENTATION
-#include "cymcalc.h"
+#include "..\cymcalc.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -128,7 +128,7 @@ int main() {
 
 
     printf("--------------------------------------------\n");
-    printf(" Example 3: Nested expressions\n");
+    printf(" Example 5: Nested expressions\n");
     printf("--------------------------------------------\n");
     {
         ExprIndex x = expr_symbol(&a,"x");

@@ -12,3 +12,5 @@ since this depends on GMP you will need to include and link with it. For example
 ```sh
 gcc examples.c -I <insert-path-to-GMP>\include -L<insert-path-to-GMP>\lib -lgmp -static
 ```
+
+now I have also added building and regression testing using nob.h. To use one will need to switch gcc to prefered C compiler and change paths to GMP in nob.c. Test uses fc so as is it will only work on Windows.
