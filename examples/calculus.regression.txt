@@ -1,0 +1,13 @@
+----------------------------------------------------
+ Example: Symbolic differentiation and integration
+----------------------------------------------------
+f(x) = ((x ^ 3) + sin(x))
+f'(x) = d/dx(((x ^ 3) + sin(x))) = ((3 * (x ^ 2)) + cos(x))
+∫f(x)dx = ∫(((x ^ 3) + sin(x)))dx = ((1/4 * (x ^ 4)) + (-1 * cos(x)))
+∫(d/dx(((x ^ 3) + sin(x))))dx = ((x ^ 3) + sin(x)), so we have f(x)==∫f'(x)dx being TRUE
+--------------------------------------------
+ Nested expressions
+--------------------------------------------
+h(x) = (sin(x) * exp((x ^ 2)))
+h'(x) = ((cos(x) * exp((x ^ 2))) + (sin(x) * (exp((x ^ 2)) * (2 * x))))
+(sin(x) * exp((x ^ 2)))∫h(x)dx = ∫((sin(x) * exp((x ^ 2))))dx
